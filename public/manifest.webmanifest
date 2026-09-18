@@ -1,0 +1,16 @@
+{
+  "name": "Enlace ERP",
+  "short_name": "Enlace",
+  "description": "Plataforma ERP SaaS Multi-Tenant com isolamento por CNPJ",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090d16",
+  "theme_color": "#090d16",
+  "icons": [
+    {
+      "src": "/assets/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    }
+  ]
+}
