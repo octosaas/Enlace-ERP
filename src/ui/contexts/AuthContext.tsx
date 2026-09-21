@@ -143,6 +143,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     []
   );
 
+  const cleanLocalState = useCallback(() => {
+    setToken(null);
+    setRefreshToken(null);
+    setCurrentSessionId(null);
+    setUser(null);
+    setCompanies([]);
+    setActiveCompany(null);
+    setActiveMembership(null);
+    setActiveSchema(null);
+    localStorage.removeItem(STORAGE_KEY_TOKEN);
+    localStorage.removeItem(STORAGE_KEY_REFRESH);
+    localStorage.removeItem(STORAGE_KEY_SESSION);
+    localStorage.removeItem(STORAGE_KEY_COMPANY);
+  }, []);
+
   const logout = useCallback(async () => {
     try {
       const savedToken = token || localStorage.getItem(STORAGE_KEY_TOKEN);
@@ -158,20 +173,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch {
       // Ignora erro de rede ao deslogar
     } finally {
-      setToken(null);
-      setRefreshToken(null);
-      setCurrentSessionId(null);
-      setUser(null);
-      setCompanies([]);
-      setActiveCompany(null);
-      setActiveMembership(null);
-      setActiveSchema(null);
-      localStorage.removeItem(STORAGE_KEY_TOKEN);
-      localStorage.removeItem(STORAGE_KEY_REFRESH);
-      localStorage.removeItem(STORAGE_KEY_SESSION);
-      localStorage.removeItem(STORAGE_KEY_COMPANY);
+      cleanLocalState();
     }
-  }, [token]);
+  }, [token, cleanLocalState]);
 
   const logoutAll = useCallback(async () => {
     try {
@@ -226,6 +230,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (res.ok) {
           const json = await res.json();
           if (json.success) {
+            setToken(savedToken);
+            setRefreshToken(localStorage.getItem(STORAGE_KEY_REFRESH));
             setUser(json.data.user);
             setCompanies(json.data.companies);
             setCurrentSessionId(json.data.currentSessionId || localStorage.getItem(STORAGE_KEY_SESSION));
@@ -241,19 +247,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 setActiveSchema(found.company.schemaNamespace);
               }
             }
+          } else {
+            cleanLocalState();
           }
         } else {
-          logout();
+          cleanLocalState();
         }
       } catch {
-        logout();
+        cleanLocalState();
       } finally {
         setIsLoading(false);
       }
     }
 
     restoreSession();
-  }, [logout]);
+  }, [cleanLocalState]);
 
   return (
     <AuthContext.Provider

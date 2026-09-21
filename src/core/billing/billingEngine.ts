@@ -342,6 +342,31 @@ export class RecurringBillingConcurrencyManager {
   private static activeLocks = new Set<string>();
 
   /**
+   * Executa uma função com lock síncrono para operações de banco em memória
+   */
+  static withLockSync<T>(
+    instanceId: string,
+    recurringBillingId: string,
+    competenceStart: string,
+    fn: () => T
+  ): T {
+    const lockKey = `${instanceId}:${recurringBillingId}:${competenceStart}`;
+
+    if (this.activeLocks.has(lockKey)) {
+      throw new Error(
+        `[RecurringBillingConcurrencyManager] Operação concorrente em andamento para a recorrência ${recurringBillingId} na competência ${competenceStart}.`
+      );
+    }
+
+    this.activeLocks.add(lockKey);
+    try {
+      return fn();
+    } finally {
+      this.activeLocks.delete(lockKey);
+    }
+  }
+
+  /**
    * Executa uma função com lock transacional baseado na tupla (instanceId, recurringId, competenceStart)
    * Se dois workers tentarem rodar simultaneamente, o segundo aguarda ou é rejeitado de forma controlada
    */

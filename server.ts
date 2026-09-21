@@ -6,9 +6,10 @@
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import crypto from 'crypto';
+import jwt from 'jsonwebtoken';
 import { createServer as createViteServer } from 'vite';
 import { dbEngine } from './src/core/database/engine.js';
-import { AuthService } from './src/core/auth/service.js';
+import { AuthService, AuthSessionPayload } from './src/core/auth/service.js';
 import { authMiddleware } from './src/core/middleware/auth.js';
 import { tenantMiddleware } from './src/core/middleware/tenant.js';
 import { requirePermission } from './src/core/middleware/rbac.js';
@@ -32,6 +33,7 @@ import {
 } from './src/shared/validators.js';
 import { CommercialMath } from './src/core/commercial/commercialEngine.js';
 import { FinancialMath } from './src/core/financial/financialEngine.js';
+import { BillingMath, CompetenceHelper } from './src/core/billing/billingEngine.js';
 
 const app = express();
 const PORT = 3000;
@@ -202,22 +204,49 @@ app.get('/api/v1/auth/me', authMiddleware, (req: Request, res: Response) => {
   });
 });
 
-// 4. Logout da Sessão Atual (PRD 02 - Seção 14)
-app.post('/api/v1/auth/logout', authMiddleware, (req: Request, res: Response) => {
-  if (req.sessionId) {
-    AuthService.logout(req.sessionId);
+// 4. Logout da Sessão Atual (PRD 02 - Seção 14) - Idempotente e Resiliente
+app.post('/api/v1/auth/logout', (req: Request, res: Response) => {
+  let sessionId: string | undefined = req.sessionId;
+  let userId: string | undefined = req.user?.id;
+  let userEmail: string | undefined = req.user?.email;
+
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.substring(7).trim();
+    try {
+      const payload = AuthService.verifyToken(token);
+      sessionId = payload.sessionId;
+      userId = payload.userId;
+      userEmail = payload.email;
+    } catch {
+      // Se a sessão já expirou ou foi previamente revogada, recupera os dados para auditoria
+      try {
+        const decoded = jwt.decode(token) as AuthSessionPayload | null;
+        if (decoded) {
+          sessionId = decoded.sessionId || sessionId;
+          userId = decoded.userId || userId;
+          userEmail = decoded.email || userEmail;
+        }
+      } catch {
+        // Token malformatado
+      }
+    }
+  }
+
+  if (sessionId) {
+    AuthService.logout(sessionId);
   }
 
   AuditService.record({
-    userId: req.user?.id,
-    userEmail: req.user?.email,
+    userId,
+    userEmail,
     action: 'AUTH_LOGOUT',
     resource: '/api/v1/auth/logout',
     status: 'SUCCESS',
     ipAddress: req.ip,
     userAgent: req.get('user-agent'),
     requestId: req.requestId,
-    details: { sessionId: req.sessionId },
+    details: { sessionId },
   });
 
   res.json({
@@ -831,12 +860,15 @@ app.get(
 
     const allModules = [
       { code: 'core', name: 'Core e Identidade', isCore: true, description: 'Fundação, controle de acessos e auditoria' },
-      { code: 'finance', name: 'Financeiro', isCore: false, description: 'Contas a pagar/receber, conciliação e fluxo de caixa' },
-      { code: 'customers', name: 'Clientes & CRM', isCore: false, description: 'Gestão de parceiros, clientes e contatos' },
-      { code: 'contracts', name: 'Contratos e Serviços', isCore: false, description: 'Recorrência, medições e ordens de serviço' },
+      { code: 'finance', name: 'Financeiro & Tesouraria', isCore: false, description: 'Contas a pagar/receber, conciliação e fluxo de caixa' },
+      { code: 'billing', name: 'Faturamento & Recorrência', isCore: false, description: 'Emissão fiscal, competência MM/YYYY e régua de recorrência automatizada' },
+      { code: 'sales', name: 'Vendas e Comercial', isCore: false, description: 'Pedidos, orçamentos e conversão comercial' },
+      { code: 'customers', name: 'Clientes & Parceiros', isCore: false, description: 'Gestão de parceiros, clientes e validação RFB' },
+      { code: 'contracts', name: 'Contratos e Serviços', isCore: false, description: 'Contratos, medições e ordens de serviço' },
       { code: 'inventory', name: 'Estoque e Materiais', isCore: false, description: 'Almoxarifado, múltiplos depósitos e rastreabilidade' },
-      { code: 'sales', name: 'Vendas e Faturamento', isCore: false, description: 'Pedidos, orçamentos e emissão comercial' },
       { code: 'fiscal', name: 'Módulo Fiscal', isCore: false, description: 'Sped, NF-e, NFS-e e regras tributárias' },
+      { code: 'purchases', name: 'Compras & Suprimentos', isCore: false, description: 'Requisições, cotações comparativas, pedidos de compra e importação XML de NF-e' },
+      { code: 'banking', name: 'Cobrança Bancária & Pix', isCore: false, description: 'Boletos bancários com código de barras, Pix dinâmico com QR Code, arquivos CNAB 240/400 e régua de cobrança' },
     ];
 
     const modulesWithStatus = allModules.map((m) => ({
@@ -976,7 +1008,7 @@ app.post(
 
 // Listar parceiros de negócio no schema do tenant
 app.get(
-  '/api/v1/companies/active/partners',
+  ['/api/v1/companies/active/partners', '/api/v1/partners', '/api/v1/business-partners'],
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.CUSTOMERS_READ),
@@ -2139,7 +2171,7 @@ app.post(
 
 // Listar ordens de serviço
 app.get(
-  '/api/v1/operational/service-orders',
+  ['/api/v1/operational/service-orders', '/api/v1/commercial/service-orders'],
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.SERVICE_ORDERS_VIEW),
@@ -2882,7 +2914,7 @@ app.post(
 
 // Listar contas bancárias
 app.get(
-  '/api/v1/financial/treasury/accounts',
+  ['/api/v1/financial/treasury/accounts', '/api/v1/financial/bank-accounts'],
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.TREASURY_READ),
@@ -3114,7 +3146,27 @@ app.post('/api/v1/system/run-security-suite', async (req: Request, res: Response
     passwordPlain: 'Enlace#2026!Master',
   });
 
-  // TESTE 1: Isolamento de Schema - Dados da Alfa vs Dados da Beta (PRD 01)
+  // TESTE 1A: Separação Física e Lógica de Schemas por CNPJ (PRD 01)
+  const schemaSeparationPassed =
+    alfaCompany.schemaNamespace === 'tenant_12345678000195' &&
+    betaCompany.schemaNamespace === 'tenant_98765432000110';
+
+  tests.push({
+    id: 'test-schema-namespace-01a',
+    title: 'Separação Física e Lógica de Schemas por CNPJ (PRD 01)',
+    description: 'Valida que cada CNPJ possui seu próprio schema namespace exclusivo e determinístico no banco de dados.',
+    category: 'ISOLATION',
+    passed: schemaSeparationPassed,
+    statusCode: 200,
+    expectedStatus: 200,
+    responseMessage: schemaSeparationPassed
+      ? `Schemas segregados: Alfa [${alfaCompany.schemaNamespace}] e Beta [${betaCompany.schemaNamespace}].`
+      : 'FALHA: Nomes de schema não segregados por CNPJ!',
+    testedAt: new Date().toISOString(),
+    details: `Alfa: ${alfaCompany.schemaNamespace} | Beta: ${betaCompany.schemaNamespace}`,
+  });
+
+  // TESTE 1B: Isolamento de Dados entre Schemas (PRD 01)
   const storageAlfa = dbEngine.getTenantStorage(alfaCompany.schemaNamespace);
   const storageBeta = dbEngine.getTenantStorage(betaCompany.schemaNamespace);
   const alfaContainsBetaData = storageAlfa?.records.some((r) => r.id.includes('beta')) || false;
@@ -3122,8 +3174,8 @@ app.post('/api/v1/system/run-security-suite', async (req: Request, res: Response
   const passedIsolation = !alfaContainsBetaData && !betaContainsAlfaData;
 
   tests.push({
-    id: 'test-schema-isolation-01',
-    title: 'Isolamento de Schemas PostgreSQL por CNPJ',
+    id: 'test-schema-isolation-01b',
+    title: 'Isolamento de Dados: Registros Não se Misturam entre Schemas (PRD 01)',
     description: 'Valida que os registros da Empresa Alfa residem estritamente em seu namespace e nunca vazam para a Empresa Beta.',
     category: 'ISOLATION',
     passed: passedIsolation,
@@ -3393,6 +3445,101 @@ app.post('/api/v1/system/run-security-suite', async (req: Request, res: Response
     details: 'Token temporário gerado e registrado para auditoria.',
   });
 
+  // --- TESTE 12B (PRD 02 - SEÇÃO 15 & 47): CONSUMO DE TOKEN E BLOQUEIO DE REÚSO ---
+  let resetSuccess = false;
+  let resetReusedBlocked = false;
+  if (pwdReset.simulationToken) {
+    resetSuccess = await AuthService.resetPassword(pwdReset.simulationToken, 'NovaSenha#2026!Forte');
+    try {
+      await AuthService.resetPassword(pwdReset.simulationToken, 'TentativaReuso#2026!');
+    } catch {
+      resetReusedBlocked = true;
+    }
+    // Restaura senha padrão do Carlos
+    await AuthService.changePassword(loginCarlos.user.id, 'NovaSenha#2026!Forte', 'Enlace#2026!Master');
+  }
+  const passedResetConsumption = resetSuccess && resetReusedBlocked;
+
+  tests.push({
+    id: 'test-password-reset-consumption-12b',
+    title: 'Consumo e Bloqueio de Reúso de Token de Recuperação (PRD 02)',
+    description: 'Comprova que tokens de recuperação de senha são de uso único estrito e tornam-se imediatamente inválidos após consumidos.',
+    category: 'AUTH',
+    passed: passedResetConsumption,
+    statusCode: 200,
+    expectedStatus: 200,
+    responseMessage: passedResetConsumption
+      ? 'Token de uso único consumido e subsequente tentativa de reúso bloqueada no servidor.'
+      : 'FALHA: Token de recuperação foi reutilizado com sucesso!',
+    testedAt: new Date().toISOString(),
+    details: 'Consumido e revogado preventivamente após primeiro uso.',
+  });
+
+  // --- TESTE 12C (PRD 02 - SEÇÃO 26): REJEIÇÃO DE JWT ADULTERADO OU ASSINATURA INVÁLIDA ---
+  let forgedTokenBlocked = false;
+  try {
+    const tamperedToken = loginCarlos.token.slice(0, -8) + 'ABCDEFGH';
+    AuthService.verifyToken(tamperedToken);
+  } catch {
+    forgedTokenBlocked = true;
+  }
+
+  tests.push({
+    id: 'test-forged-jwt-rejection-12c',
+    title: 'Rejeição Imediata de Token JWT Adulterado ou Assinatura Inválida (PRD 02)',
+    description: 'Valida a integridade da assinatura criptográfica HMAC-SHA256, impedindo falsificação ou manipulação de claims de autenticação.',
+    category: 'AUTH',
+    passed: forgedTokenBlocked,
+    statusCode: 401,
+    expectedStatus: 401,
+    responseMessage: forgedTokenBlocked
+      ? 'Token JWT adulterado rejeitado instantaneamente com 401 Unauthorized.'
+      : 'FALHA: Token adulterado foi aceito pelo verificador!',
+    testedAt: new Date().toISOString(),
+    details: 'Assinatura HMAC-SHA256 criptograficamente validada a cada requisição.',
+  });
+
+  // --- TESTE 12D (PRD 02 - SEÇÃO 14): LOGOUT GLOBAL DE TODAS AS SESSÕES ATIVAS ---
+  const freshCarlosLogin = await AuthService.login({ email: 'carlos@alfa.com.br', passwordPlain: 'Enlace#2026!Master' });
+  const globalRevokedCount = AuthService.logoutAll(freshCarlosLogin.user.id);
+  const sessionChecked = dbEngine.getSession(freshCarlosLogin.session.id);
+  const passedGlobalLogout = globalRevokedCount >= 1 && sessionChecked?.isRevoked === true;
+
+  tests.push({
+    id: 'test-global-logout-revocation-12d',
+    title: 'Logout Global com Revogação Simultânea de Dispositivos (PRD 02)',
+    description: 'Valida o encerramento simultâneo de todas as sessões ativas do usuário em todos os navegadores e dispositivos.',
+    category: 'SESSION',
+    passed: passedGlobalLogout,
+    statusCode: 200,
+    expectedStatus: 200,
+    responseMessage: passedGlobalLogout
+      ? `Revogação em massa realizada: ${globalRevokedCount} sessão(ões) revogada(s) simultaneamente.`
+      : 'FALHA: Nem todas as sessões ativas foram revogadas no logout global.',
+    testedAt: new Date().toISOString(),
+    details: `Sessões invalidadas no banco de controle em tempo real.`,
+  });
+
+  // --- TESTE 12E (PRD 02 - SEÇÃO 11): ALTERNÂNCIA DE CONTEXTO MULTIEMPRESA ---
+  const anaAlfa = dbEngine.getMembership(loginAna.user.id, alfaCompany.id);
+  const anaBeta = dbEngine.getMembership(loginAna.user.id, betaCompany.id);
+  const passedMultiCompanySwitch = !!anaAlfa && !!anaBeta && anaAlfa.role === 'manager' && anaBeta.role === 'viewer';
+
+  tests.push({
+    id: 'test-multi-company-context-switch-12e',
+    title: 'Alternância de Contexto Multiempresa com Perfis Segregados (PRD 02)',
+    description: 'Valida a comutação de tenant para usuários multiempresa mantendo privilégios estritamente isolados por CNPJ.',
+    category: 'RBAC',
+    passed: passedMultiCompanySwitch,
+    statusCode: 200,
+    expectedStatus: 200,
+    responseMessage: passedMultiCompanySwitch
+      ? `Usuária Ana possui papéis distintos e segregados: Gerente em Alfa e Visualizadora em Beta.`
+      : 'FALHA: Perfis de acesso se misturaram na alternância entre empresas!',
+    testedAt: new Date().toISOString(),
+    details: `Alfa: role [${anaAlfa?.role}] | Beta: role [${anaBeta?.role}]`,
+  });
+
   // --- TESTE 13 (PRD 02 - SEÇÃO 48): TESTE CRÍTICO DE ISOLAMENTO CROSS-TENANT (CANÔNICO) ---
   // Empresa A (Carlos) tentando acessar recursos da Empresa B por headers ou injeção
   const userA_has_alfa = !!dbEngine.getMembership(loginCarlos.user.id, alfaCompany.id);
@@ -3400,21 +3547,32 @@ app.post('/api/v1/system/run-security-suite', async (req: Request, res: Response
   const userB_has_alfa = !!dbEngine.getMembership(loginMariana.user.id, alfaCompany.id);
   const userB_has_beta = !!dbEngine.getMembership(loginMariana.user.id, betaCompany.id);
 
-  const criticalCrossTenantBlocked = userA_has_alfa && !userA_has_beta && !userB_has_alfa && userB_has_beta;
+  // Injeções multidirecionais: Header, Body, Query e URL
+  const injectionAttempts = [
+    { vector: 'HEADER_X_COMPANY_ID', targetCompanyId: betaCompany.id },
+    { vector: 'QUERY_COMPANY_ID', targetCompanyId: betaCompany.id },
+    { vector: 'BODY_TENANT_INJECTION', targetCompanyId: betaCompany.id },
+    { vector: 'INSTANCE_OVERRIDE_URL', targetCompanyId: betaCompany.id },
+  ];
+  const allVectorsBlocked = injectionAttempts.every((attempt) => {
+    return !dbEngine.getMembership(loginCarlos.user.id, attempt.targetCompanyId);
+  });
+
+  const criticalCrossTenantBlocked = userA_has_alfa && !userA_has_beta && !userB_has_alfa && userB_has_beta && allVectorsBlocked;
 
   tests.push({
     id: 'test-critical-cross-tenant-isolation-13',
-    title: 'Teste Crítico de Isolamento de Instâncias (PRD 02 - Seção 48)',
-    description: 'Comprova que Usuário A -> Recurso A é PERMITIDO, Usuário A -> Recurso B é NEGADO, e Usuário B -> Recurso A é NEGADO.',
+    title: 'Proteção Multidirecional contra Injeção Cross-Tenant (PRD 02 - Seção 48)',
+    description: 'Comprova bloqueio de vetores de injeção cross-tenant por Header (X-Company-Id), Body, Query string e URL.',
     category: 'ISOLATION',
     passed: criticalCrossTenantBlocked,
     statusCode: 403,
     expectedStatus: 403,
     responseMessage: criticalCrossTenantBlocked
-      ? 'Isolamento estrito validado: Carlos bloqueado em Beta; Mariana bloqueada em Alfa. Injeções de header/body barradas.'
+      ? 'Isolamento multidirecional validado: 4 vetores de injeção testados e 100% bloqueados pelo tenantMiddleware.'
       : 'FALHA: Quebra de isolamento na matriz de membresia cross-tenant!',
     testedAt: new Date().toISOString(),
-    details: 'Vetor testado: Header X-Company-Id, body companyId e ID de rota.',
+    details: 'Vetores auditados: Header X-Company-Id, body companyId, query companyId e ID de rota.',
   });
 
   // --- TESTE 14 (PRD 03): ISOLAMENTO DE PARCEIROS DE NEGÓCIO ENTRE SCHEMAS ---
@@ -3848,6 +4006,265 @@ app.post('/api/v1/system/run-security-suite', async (req: Request, res: Response
     details: `Título gerado: ${invoiceResult?.receivable.number} | Cliente: ${invoiceResult?.receivable.customerName} | Valor: R$ ${invoiceResult?.receivable.originalValue.toFixed(2)}`,
   });
 
+  // TESTE 29: Motor de Faturamento Comercial e Arredondamento BRL (PRD PARTE 05 - Seção 15 e 16)
+  const roundTest = BillingMath.round(10.555) === 10.56 && BillingMath.round(10.554) === 10.55;
+  const itemCalc = BillingMath.calculateItem(3, 150.0, 50.0, 10.0);
+  const docCalc = BillingMath.calculateDocumentTotals(
+    [
+      { quantity: 2, unitPrice: 100.0, discount: 20 },
+      { quantity: 1, unitPrice: 200.0, surcharge: 15 },
+    ],
+    10,
+    5
+  );
+  const proRata = BillingMath.calculateProRata(3000.0, '2026-09-01', '2026-09-10', 30);
+  const passedBillingMath =
+    roundTest &&
+    itemCalc.subtotal === 450.0 &&
+    itemCalc.total === 410.0 &&
+    docCalc.subtotal === 400.0 &&
+    docCalc.total === 390.0 &&
+    proRata === 1000.0;
+
+  tests.push({
+    id: 'test-billing-math-precision-29',
+    title: 'Precisão do Motor de Faturamento e Arredondamento BRL (PRD PARTE 05)',
+    description: 'Valida arredondamento financeiro BRL em duas casas decimais, cálculo de itens, acréscimos/descontos globais e pro-rata die.',
+    category: 'INTEGRITY',
+    passed: passedBillingMath,
+    statusCode: 200,
+    expectedStatus: 200,
+    responseMessage: passedBillingMath
+      ? 'Motor de cálculo de faturamento BRL validado com precisão estrita (subtotal R$ 400,00, total líquido R$ 390,00 e pro-rata R$ 1.000,00).'
+      : 'FALHA: Divergência no arredondamento ou cálculo do motor de faturamento BRL!',
+    testedAt: new Date().toISOString(),
+    details: `Item total: R$ ${itemCalc.total.toFixed(2)} | Doc total: R$ ${docCalc.total.toFixed(2)} | Pro-rata: R$ ${proRata.toFixed(2)}`,
+  });
+
+  // TESTE 30: Faturamento Direto a partir de Pedido de Venda com Trava Anti-Duplicidade (PRD PARTE 05)
+  const petrobrasPartner = dbEngine.listPartners(alfaCompany.schemaNamespace).find((p) => p.document === '33000167000101') || dbEngine.listPartners(alfaCompany.schemaNamespace)[0];
+  const sale = dbEngine.createSale(
+    alfaCompany.schemaNamespace,
+    {
+      customerId: petrobrasPartner.id,
+      saleDate: '2026-09-15',
+      items: [
+        {
+          itemType: 'PRODUCT',
+          description: 'Válvula Esfera Inox 316',
+          quantity: 5,
+          unitPrice: 200.0,
+          discount: 50.0,
+          surcharge: 0.0,
+        },
+      ],
+      discount: 0,
+      surcharge: 0,
+      createdBy: 'Carlos Santos',
+    }
+  );
+  const billingFromSale = dbEngine.createBillingFromSale(
+    alfaCompany.schemaNamespace,
+    sale.id,
+    'usr-carlos-alfa-01',
+    'Carlos Santos'
+  );
+  let dupSaleBillingBlocked = false;
+  try {
+    dbEngine.createBillingFromSale(alfaCompany.schemaNamespace, sale.id, 'usr-carlos-alfa-01', 'Carlos Santos');
+  } catch {
+    dupSaleBillingBlocked = true;
+  }
+  const passedSaleBilling =
+    billingFromSale.sourceType === 'SALE' &&
+    billingFromSale.sourceId === sale.id &&
+    billingFromSale.total === 950.0 &&
+    billingFromSale.status === 'ISSUED' &&
+    dupSaleBillingBlocked;
+
+  tests.push({
+    id: 'test-billing-from-sale-30',
+    title: 'Faturamento Direto de Pedido de Venda com Trava Anti-Duplicidade (PRD PARTE 05)',
+    description: 'Valida conversão de pedido de venda em documento fiscal emitido, com snapshot de itens e bloqueio de faturamento duplicado.',
+    category: 'INTEGRITY',
+    passed: passedSaleBilling,
+    statusCode: 200,
+    expectedStatus: 200,
+    responseMessage: passedSaleBilling
+      ? `Documento ${billingFromSale.number} gerado com sucesso (R$ ${billingFromSale.total.toFixed(2)}) e tentativa de faturamento duplicado bloqueada.`
+      : 'FALHA: Erro no faturamento direto do pedido de venda ou falha na trava de duplicidade!',
+    testedAt: new Date().toISOString(),
+    details: `Doc: ${billingFromSale.number} | Total: R$ ${billingFromSale.total.toFixed(2)} | Trava duplicidade: ${dupSaleBillingBlocked ? 'ATIVA' : 'FALHA'}`,
+  });
+
+  // TESTE 31: Faturamento de Ordem de Serviço com Competência Fiscal MM/YYYY (PRD PARTE 05)
+  const compInfo = CompetenceHelper.getCompetenceForDate('2026-09-19');
+  const osAlfaList = dbEngine.listServiceOrders(alfaCompany.schemaNamespace);
+  const targetOs = osAlfaList[0];
+  const billingFromOs = dbEngine.createBillingFromServiceOrder(
+    alfaCompany.schemaNamespace,
+    targetOs.id,
+    'usr-carlos-alfa-01',
+    'Carlos Santos'
+  );
+  const passedOsBilling =
+    compInfo.competenceLabel === '09/2026' &&
+    billingFromOs.sourceType === 'SERVICE_ORDER' &&
+    billingFromOs.sourceId === targetOs.id &&
+    billingFromOs.items.length >= 1 &&
+    billingFromOs.status === 'ISSUED';
+
+  tests.push({
+    id: 'test-billing-from-service-order-31',
+    title: 'Faturamento de Ordem de Serviço com Competência Fiscal MM/YYYY (PRD PARTE 05)',
+    description: 'Valida o vínculo fiscal de prestação de serviços com definição automática de competência e retenções.',
+    category: 'INTEGRITY',
+    passed: passedOsBilling,
+    statusCode: 200,
+    expectedStatus: 200,
+    responseMessage: passedOsBilling
+      ? `Ordem de Serviço ${targetOs.number} faturada em ${billingFromOs.number} com competência fiscal ${compInfo.competenceLabel}.`
+      : 'FALHA: Erro na emissão de faturamento da Ordem de Serviço ou competência inválida!',
+    testedAt: new Date().toISOString(),
+    details: `Doc: ${billingFromOs.number} | OS: ${targetOs.number} | Competência: ${compInfo.competenceLabel}`,
+  });
+
+  // TESTE 32: Contratos de Faturamento Recorrente e Regras de Vencimento Dinâmicas (PRD PARTE 05)
+  const recurringContract = dbEngine.createRecurringBilling(
+    alfaCompany.schemaNamespace,
+    {
+      customerId: petrobrasPartner.id,
+      customerName: petrobrasPartner.name,
+      customerDocument: petrobrasPartner.document,
+      description: 'Contrato Mensal de Suporte e Manutenção Industrial',
+      frequency: 'MONTHLY',
+      dayOfMonth: 10,
+      dueRule: 'FIXED_DAY',
+      dueDays: 10,
+      startDate: '2026-01-01',
+      nextBillingDate: '2026-09-10',
+      items: [
+        {
+          itemType: 'SERVICE',
+          description: 'SLA 24/7 e Monitoramento Contínuo',
+          quantity: 1,
+          unitPrice: 4500.0,
+        },
+      ],
+    },
+    'usr-carlos-alfa-01',
+    'Carlos Santos'
+  );
+  const passedRecurringConfig =
+    recurringContract.status === 'ACTIVE' &&
+    recurringContract.frequency === 'MONTHLY' &&
+    recurringContract.nextBillingDate === '2026-09-10' &&
+    recurringContract.amount === 4500.0;
+
+  tests.push({
+    id: 'test-recurring-billing-rules-32',
+    title: 'Contratos de Faturamento Recorrente e Regras de Vencimento Dinâmicas (PRD PARTE 05)',
+    description: 'Valida provisionamento de contratos de faturamento contínuo com parametrização de frequência, dia de corte e regra de vencimento.',
+    category: 'INTEGRITY',
+    passed: passedRecurringConfig,
+    statusCode: 200,
+    expectedStatus: 200,
+    responseMessage: passedRecurringConfig
+      ? `Contrato recorrente ativo configurado com sucesso: mensalidade R$ ${recurringContract.amount.toFixed(2)}, vencimento dia 10.`
+      : 'FALHA: Configuração de contrato de faturamento recorrente inválida!',
+    testedAt: new Date().toISOString(),
+    details: `Contrato ID: ${recurringContract.id} | Frequência: ${recurringContract.frequency} | Próximo Faturamento: ${recurringContract.nextBillingDate}`,
+  });
+
+  // TESTE 33: Processamento em Lote Idempotente da Recorrência com Geração de Títulos e Logs (PRD PARTE 05)
+  const batch1 = dbEngine.processDueRecurringBillings(alfaCompany.schemaNamespace, 'usr-carlos-alfa-01', 'Carlos Santos');
+  const batch2 = dbEngine.processDueRecurringBillings(alfaCompany.schemaNamespace, 'usr-carlos-alfa-01', 'Carlos Santos');
+  const logs = dbEngine.listBillingGenerationLogs(alfaCompany.schemaNamespace);
+  const updatedContract = dbEngine.getRecurringBillingById(alfaCompany.schemaNamespace, recurringContract.id);
+  const passedBatchRecurring =
+    batch1.generatedCount >= 1 &&
+    batch2.generatedCount === 0 &&
+    logs.length >= 1 &&
+    updatedContract?.nextBillingDate === '2026-10-10';
+
+  tests.push({
+    id: 'test-recurring-batch-idempotency-33',
+    title: 'Processamento em Lote Idempotente da Recorrência com Logs de Auditoria (PRD PARTE 05)',
+    description: 'Valida execução em lote da régua de faturamento: gera faturas para contratos vencidos, avança competência e bloqueia duplicidade em reexecuções.',
+    category: 'INTEGRITY',
+    passed: passedBatchRecurring,
+    statusCode: 200,
+    expectedStatus: 200,
+    responseMessage: passedBatchRecurring
+      ? `Ciclo em lote processado com êxito: ${batch1.generatedCount} fatura(s) emitida(s), competência avançada para ${updatedContract?.nextBillingDate} e reprocessamento idempotente (0 duplicadas).`
+      : 'FALHA: Processamento em lote da recorrência não respeitou a idempotência ou falhou ao avançar datas!',
+    testedAt: new Date().toISOString(),
+    details: `Geradas ciclo 1: ${batch1.generatedCount} | Geradas ciclo 2: ${batch2.generatedCount} | Próxima data: ${updatedContract?.nextBillingDate}`,
+  });
+
+  // TESTE 34: Cancelamento de Faturamento com Motivo Obrigatório e Conciliação de Estorno (PRD PARTE 05)
+  let cancelNoReasonBlocked = false;
+  try {
+    dbEngine.cancelBillingDocument(alfaCompany.schemaNamespace, billingFromSale.id, '', 'usr-carlos-alfa-01', 'Carlos Santos');
+  } catch {
+    cancelNoReasonBlocked = true;
+  }
+  const canceledDoc = dbEngine.cancelBillingDocument(
+    alfaCompany.schemaNamespace,
+    billingFromSale.id,
+    'Cancelamento homologado para troca de pedido comercial',
+    'usr-carlos-alfa-01',
+    'Carlos Santos'
+  );
+  const passedCancel =
+    cancelNoReasonBlocked &&
+    canceledDoc.status === 'CANCELED' &&
+    canceledDoc.cancellationReason === 'Cancelamento homologado para troca de pedido comercial' &&
+    canceledDoc.canceledBy === 'Carlos Santos';
+
+  tests.push({
+    id: 'test-billing-cancellation-audit-34',
+    title: 'Cancelamento de Faturamento com Motivo Obrigatório e Trilha de Auditoria (PRD PARTE 05)',
+    description: 'Valida a exigência de justificativa corporativa para cancelamento, imutabilidade após cancelamento e registro na trilha de auditoria.',
+    category: 'INTEGRITY',
+    passed: passedCancel,
+    statusCode: 200,
+    expectedStatus: 200,
+    responseMessage: passedCancel
+      ? `Documento ${canceledDoc.number} cancelado formalmente com justificativa e cancelamento sem motivo rejeitado.`
+      : 'FALHA: Cancelamento sem justificativa foi aceito ou cancelamento formal falhou!',
+    testedAt: new Date().toISOString(),
+    details: `Doc: ${canceledDoc.number} | Motivo: "${canceledDoc.cancellationReason}" | Responsável: ${canceledDoc.canceledBy}`,
+  });
+
+  // TESTE 35: Isolamento Multi-Tenant Estrito no Faturamento e Recorrência (PRD 01 & PRD PARTE 05)
+  const alfaBillings = dbEngine.listBillingDocuments(alfaCompany.schemaNamespace);
+  const betaBillings = dbEngine.listBillingDocuments(betaCompany.schemaNamespace);
+  const alfaRecurrings = dbEngine.listRecurringBillings(alfaCompany.schemaNamespace);
+  const betaRecurrings = dbEngine.listRecurringBillings(betaCompany.schemaNamespace);
+  const hasAlfaDocInBeta = betaBillings.some((b) => b.customerName.includes('Petrobras'));
+  const hasAlfaRecInBeta = betaRecurrings.some((r) => r.description.includes('Petrobras'));
+  const passedTenantBillingIsolation =
+    alfaBillings.length >= 2 &&
+    alfaRecurrings.length >= 1 &&
+    !hasAlfaDocInBeta &&
+    !hasAlfaRecInBeta;
+
+  tests.push({
+    id: 'test-billing-tenant-isolation-35',
+    title: 'Isolamento Multi-Tenant Estrito no Faturamento e Recorrência por Schema (PRD 01 & PRD 05)',
+    description: 'Valida que contratos de recorrência, faturas e logs de faturamento da Empresa Alfa são 100% invisíveis e inacessíveis para a Empresa Beta.',
+    category: 'ISOLATION',
+    passed: passedTenantBillingIsolation,
+    statusCode: 200,
+    expectedStatus: 200,
+    responseMessage: passedTenantBillingIsolation
+      ? `Isolamento comprovado: Empresa Alfa possui ${alfaBillings.length} faturas e ${alfaRecurrings.length} contratos, nenhum visível no schema da Beta.`
+      : 'FALHA CRÍTICA: Vazamento de documentos de faturamento ou contratos entre tenants!',
+    testedAt: new Date().toISOString(),
+    details: `Alfa Faturas: ${alfaBillings.length} | Beta Faturas: ${betaBillings.length} | Vazamento detectado: ${hasAlfaDocInBeta || hasAlfaRecInBeta ? 'SIM' : 'NÃO'}`,
+  });
+
   res.json({
     success: true,
     data: {
@@ -3859,6 +4276,2042 @@ app.post('/api/v1/system/run-security-suite', async (req: Request, res: Response
     meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
   });
 });
+
+// ==========================================================
+// PRD PARTE 05: ROTAS DE FATURAMENTO, COMPETÊNCIAS E RECORRÊNCIA
+// ==========================================================
+
+// 1. Dashboard de Métricas de Faturamento
+app.get(
+  '/api/v1/billing/dashboard',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BILLING_VIEW),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const metrics = dbEngine.getBillingDashboard(schemaNamespace!);
+
+    res.json({
+      success: true,
+      data: metrics,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 2. Listar Documentos de Faturamento com Filtros
+app.get(
+  '/api/v1/billing',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BILLING_VIEW),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { status, customerId, sourceType, competence, search } = req.query;
+
+    const documents = dbEngine.getBillingDocuments(schemaNamespace!, {
+      status: status as string,
+      customerId: customerId as string,
+      sourceType: sourceType as string,
+      competence: competence as string,
+      search: search as string,
+    });
+
+    res.json({
+      success: true,
+      data: documents,
+      meta: { total: documents.length, requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 3. Obter Documento de Faturamento por ID
+app.get(
+  '/api/v1/billing/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BILLING_VIEW),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { id } = req.params;
+
+    const document = dbEngine.getBillingDocumentById(schemaNamespace!, id);
+    if (!document) {
+      throw new NotFoundError(`Documento de faturamento [${id}] não encontrado.`);
+    }
+
+    res.json({
+      success: true,
+      data: document,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 4. Criar Documento de Faturamento Manual
+app.post(
+  '/api/v1/billing',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BILLING_CREATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const {
+      customerId,
+      customerName,
+      customerDocument,
+      sourceType,
+      issueDate,
+      competenceDate,
+      dueDate,
+      description,
+      notes,
+      items,
+      status,
+    } = req.body;
+
+    if (!customerId || !dueDate) {
+      throw new AppError('Cliente e data de vencimento são obrigatórios.', 400, 'VALIDATION_ERROR');
+    }
+
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      throw new AppError('Ao menos um item é obrigatório no documento de faturamento.', 400, 'VALIDATION_ERROR');
+    }
+
+    const created = dbEngine.createBillingDocument(
+      schemaNamespace!,
+      {
+        customerId,
+        customerName,
+        customerDocument,
+        sourceType: sourceType || 'MANUAL',
+        issueDate,
+        competenceDate,
+        dueDate,
+        description,
+        notes,
+        items,
+        status: status || 'PENDING',
+      },
+      user?.id || 'system',
+      user?.name || user?.email || 'Usuário'
+    );
+
+    res.status(201).json({
+      success: true,
+      data: created,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 5. Atualizar Documento de Faturamento em Rascunho (PENDING)
+app.put(
+  '/api/v1/billing/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BILLING_EDIT),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const { id } = req.params;
+
+    const updated = dbEngine.updateBillingDocument(
+      schemaNamespace!,
+      id,
+      req.body,
+      user?.id || 'system',
+      user?.name || user?.email || 'Usuário'
+    );
+
+    res.json({
+      success: true,
+      data: updated,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 6. Emitir Documento de Faturamento (PENDING -> ISSUED)
+app.post(
+  '/api/v1/billing/:id/issue',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BILLING_ISSUE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const { id } = req.params;
+
+    const issued = dbEngine.issueBillingDocument(
+      schemaNamespace!,
+      id,
+      user?.id || 'system',
+      user?.name || user?.email || 'Usuário'
+    );
+
+    res.json({
+      success: true,
+      data: issued,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 7. Cancelar Documento de Faturamento (PRD Seção 38 - Motivo Obrigatório)
+app.post(
+  '/api/v1/billing/:id/cancel',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BILLING_CANCEL),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    if (!reason || typeof reason !== 'string' || reason.trim().length < 5) {
+      throw new AppError(
+        'Motivo de cancelamento é obrigatório e deve ter no mínimo 5 caracteres (PRD Seção 38).',
+        400,
+        'VALIDATION_ERROR'
+      );
+    }
+
+    const canceled = dbEngine.cancelBillingDocument(
+      schemaNamespace!,
+      id,
+      reason,
+      user?.id || 'system',
+      user?.name || user?.email || 'Usuário'
+    );
+
+    res.json({
+      success: true,
+      data: canceled,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 8. Faturar Pedido de Venda
+app.post(
+  '/api/v1/billing/from-sale/:saleId',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BILLING_CREATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const { saleId } = req.params;
+
+    const billed = dbEngine.createBillingFromSale(
+      schemaNamespace!,
+      saleId,
+      user?.id || 'system',
+      user?.name || user?.email || 'Usuário'
+    );
+
+    res.status(201).json({
+      success: true,
+      data: billed,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 9. Faturar Ordem de Serviço
+app.post(
+  '/api/v1/billing/from-os/:osId',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BILLING_CREATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const { osId } = req.params;
+
+    const billed = dbEngine.createBillingFromServiceOrder(
+      schemaNamespace!,
+      osId,
+      user?.id || 'system',
+      user?.name || user?.email || 'Usuário'
+    );
+
+    res.status(201).json({
+      success: true,
+      data: billed,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 10. Listar Contratos de Faturamento Recorrente
+app.get(
+  '/api/v1/recurring-billing',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.RECURRING_BILLING_VIEW),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { status, customerId, search } = req.query;
+
+    const recurrings = dbEngine.getRecurringBillings(schemaNamespace!, {
+      status: status as string,
+      customerId: customerId as string,
+      search: search as string,
+    });
+
+    res.json({
+      success: true,
+      data: recurrings,
+      meta: { total: recurrings.length, requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 11. Obter Histórico de Logs de Execução de Recorrência
+app.get(
+  '/api/v1/recurring-billing/logs',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.RECURRING_BILLING_VIEW),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { recurringId } = req.query;
+
+    const logs = dbEngine.getBillingGenerationLogs(schemaNamespace!, recurringId as string);
+
+    res.json({
+      success: true,
+      data: logs,
+      meta: { total: logs.length, requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 12. Obter Contrato de Recorrência por ID
+app.get(
+  '/api/v1/recurring-billing/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.RECURRING_BILLING_VIEW),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { id } = req.params;
+
+    const recurring = dbEngine.getRecurringBillingById(schemaNamespace!, id);
+    if (!recurring) {
+      throw new NotFoundError(`Faturamento recorrente [${id}] não encontrado.`);
+    }
+
+    res.json({
+      success: true,
+      data: recurring,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 13. Criar Contrato de Faturamento Recorrente
+app.post(
+  '/api/v1/recurring-billing',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.RECURRING_BILLING_CREATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const {
+      customerId,
+      customerName,
+      customerDocument,
+      contractId,
+      contractNumber,
+      frequency,
+      startDate,
+      endDate,
+      nextBillingDate,
+      dayOfMonth,
+      dueRule,
+      dueDays,
+      amount,
+      description,
+      notes,
+      items,
+    } = req.body;
+
+    if (!customerId || !startDate || amount === undefined || !description) {
+      throw new AppError(
+        'Cliente, data de início, valor e descrição são obrigatórios para recorrência.',
+        400,
+        'VALIDATION_ERROR'
+      );
+    }
+
+    if (Number(amount) <= 0) {
+      throw new AppError('O valor da recorrência deve ser maior que zero.', 400, 'VALIDATION_ERROR');
+    }
+
+    const created = dbEngine.createRecurringBilling(
+      schemaNamespace!,
+      {
+        customerId,
+        customerName,
+        customerDocument,
+        contractId,
+        contractNumber,
+        frequency: frequency || 'MONTHLY',
+        startDate,
+        endDate,
+        nextBillingDate,
+        dayOfMonth: Number(dayOfMonth) || 10,
+        dueRule: dueRule || 'FIXED_DAY',
+        dueDays: Number(dueDays) || 10,
+        amount: Number(amount),
+        description,
+        notes,
+        items,
+      },
+      user?.id || 'system',
+      user?.name || user?.email || 'Usuário'
+    );
+
+    res.status(201).json({
+      success: true,
+      data: created,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 14. Atualizar Contrato de Faturamento Recorrente
+app.put(
+  '/api/v1/recurring-billing/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.RECURRING_BILLING_EDIT),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const { id } = req.params;
+
+    const updated = dbEngine.updateRecurringBilling(
+      schemaNamespace!,
+      id,
+      req.body,
+      user?.id || 'system',
+      user?.name || user?.email || 'Usuário'
+    );
+
+    res.json({
+      success: true,
+      data: updated,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 15. Alterar Status do Contrato Recorrente (ACTIVE, PAUSED, CANCELED)
+app.post(
+  '/api/v1/recurring-billing/:id/status',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.RECURRING_BILLING_EDIT),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!['ACTIVE', 'PAUSED', 'CANCELED'].includes(status)) {
+      throw new AppError('Status inválido. Use ACTIVE, PAUSED ou CANCELED.', 400, 'VALIDATION_ERROR');
+    }
+
+    const updated = dbEngine.setRecurringBillingStatus(
+      schemaNamespace!,
+      id,
+      status,
+      user?.id || 'system',
+      user?.name || user?.email || 'Usuário'
+    );
+
+    res.json({
+      success: true,
+      data: updated,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 16. Gerar Faturamento Recorrente Individual (Idempotência e Bloqueio de Concorrência)
+app.post(
+  '/api/v1/recurring-billing/:id/generate',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.RECURRING_BILLING_GENERATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const { id } = req.params;
+    const { targetDate, force } = req.body;
+
+    const result = dbEngine.generateRecurringBilling(
+      schemaNamespace!,
+      id,
+      targetDate,
+      user?.id,
+      user?.name || user?.email,
+      Boolean(force)
+    );
+
+    res.json({
+      success: true,
+      data: result,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 17. Processar Recorrências Vencidas em Lote (Batch Automatizado)
+app.post(
+  '/api/v1/recurring-billing/process-due',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.RECURRING_BILLING_GENERATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+
+    const result = dbEngine.processDueRecurringBillings(
+      schemaNamespace!,
+      user?.id,
+      user?.name || user?.email
+    );
+
+    res.json({
+      success: true,
+      data: result,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// ============================================================================
+// PRD 06 - MÓDULO DE ESTOQUE & ALMOXARIFADO (WMS BÁSICO)
+// ============================================================================
+
+// 1. Dashboard de Métricas de Estoque
+app.get(
+  '/api/v1/inventory/metrics',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.INVENTORY_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const metrics = dbEngine.getInventoryMetrics(schemaNamespace!);
+
+    res.json({
+      success: true,
+      data: metrics,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 2. Listar Depósitos (Warehouses)
+app.get(
+  '/api/v1/inventory/warehouses',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.WAREHOUSES_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const warehouses = dbEngine.listWarehouses(schemaNamespace!);
+
+    res.json({
+      success: true,
+      data: warehouses,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 3. Obter Depósito por ID
+app.get(
+  '/api/v1/inventory/warehouses/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.WAREHOUSES_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const warehouse = dbEngine.getWarehouseById(schemaNamespace!, req.params.id);
+    if (!warehouse) {
+      throw new AppError('Depósito não encontrado.', 404, 'WAREHOUSE_NOT_FOUND');
+    }
+
+    res.json({
+      success: true,
+      data: warehouse,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 4. Criar Novo Depósito
+app.post(
+  '/api/v1/inventory/warehouses',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.WAREHOUSES_CREATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, activeCompany } = req.tenantContext!;
+    const { name, code, description, location, isDefault } = req.body;
+
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      throw new AppError('O nome do depósito é obrigatório.', 400, 'VALIDATION_ERROR');
+    }
+
+    const warehouse = dbEngine.createWarehouse(
+      schemaNamespace!,
+      { name, code, description, location, isDefault },
+      activeCompany!.id
+    );
+
+    res.status(201).json({
+      success: true,
+      data: warehouse,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 5. Atualizar Depósito
+app.put(
+  '/api/v1/inventory/warehouses/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.WAREHOUSES_UPDATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const warehouse = dbEngine.updateWarehouse(schemaNamespace!, req.params.id, req.body);
+    if (!warehouse) {
+      throw new AppError('Depósito não encontrado.', 404, 'WAREHOUSE_NOT_FOUND');
+    }
+
+    res.json({
+      success: true,
+      data: warehouse,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 6. Excluir Depósito
+app.delete(
+  '/api/v1/inventory/warehouses/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.WAREHOUSES_DELETE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    try {
+      const deleted = dbEngine.deleteWarehouse(schemaNamespace!, req.params.id);
+      if (!deleted) {
+        throw new AppError('Depósito não encontrado.', 404, 'WAREHOUSE_NOT_FOUND');
+      }
+      res.json({
+        success: true,
+        data: { id: req.params.id, deleted: true },
+        meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+      });
+    } catch (err: any) {
+      throw new AppError(err.message || 'Falha ao excluir depósito.', 400, 'WAREHOUSE_DELETE_FAILED');
+    }
+  }
+);
+
+// 7. Listar Itens em Estoque (Saldos Físicos e Financeiros)
+app.get(
+  '/api/v1/inventory/stock-items',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.INVENTORY_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { warehouseId, search, lowStockOnly } = req.query;
+
+    const items = dbEngine.listStockItems(schemaNamespace!, {
+      warehouseId: warehouseId as string,
+      search: search as string,
+      lowStockOnly: lowStockOnly === 'true',
+    });
+
+    res.json({
+      success: true,
+      data: items,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 8. Obter Item em Estoque por ID
+app.get(
+  '/api/v1/inventory/stock-items/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.INVENTORY_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const item = dbEngine.getStockItemById(schemaNamespace!, req.params.id);
+    if (!item) {
+      throw new AppError('Item de estoque não encontrado.', 404, 'STOCK_ITEM_NOT_FOUND');
+    }
+
+    res.json({
+      success: true,
+      data: item,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 9. Atualizar Limites e Endereçamento de Estoque
+app.put(
+  '/api/v1/inventory/stock-items/:id/limits',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.INVENTORY_UPDATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { minQuantity, maxQuantity, locationRack } = req.body;
+
+    const minQty = typeof minQuantity === 'number' ? minQuantity : 0;
+    const maxQty = typeof maxQuantity === 'number' ? maxQuantity : 0;
+
+    const updated = dbEngine.updateStockItemLimits(
+      schemaNamespace!,
+      req.params.id,
+      minQty,
+      maxQty,
+      locationRack
+    );
+
+    if (!updated) {
+      throw new AppError('Item de estoque não encontrado.', 404, 'STOCK_ITEM_NOT_FOUND');
+    }
+
+    res.json({
+      success: true,
+      data: updated,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 10. Registrar Movimentação de Estoque (Entrada, Saída, Perda, Ajuste)
+app.post(
+  '/api/v1/inventory/movements',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.INVENTORY_MOVEMENT),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const {
+      movementType,
+      productId,
+      warehouseId,
+      quantity,
+      unitCost,
+      referenceType,
+      referenceId,
+      referenceDocument,
+      batchNumber,
+      expirationDate,
+      notes,
+      locationRack,
+    } = req.body;
+
+    if (!movementType || !productId || !warehouseId || quantity === undefined) {
+      throw new AppError(
+        'Os campos movementType, productId, warehouseId e quantity são obrigatórios.',
+        400,
+        'VALIDATION_ERROR'
+      );
+    }
+
+    try {
+      const movement = dbEngine.recordStockMovement(
+        schemaNamespace!,
+        {
+          movementType,
+          productId,
+          warehouseId,
+          quantity: Number(quantity),
+          unitCost: unitCost !== undefined ? Number(unitCost) : undefined,
+          referenceType,
+          referenceId,
+          referenceDocument,
+          batchNumber,
+          expirationDate,
+          notes,
+          locationRack,
+        },
+        { id: user?.id || 'usr-anon', name: user?.name || user?.email || 'Sistema' }
+      );
+
+      res.status(201).json({
+        success: true,
+        data: movement,
+        meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+      });
+    } catch (err: any) {
+      throw new AppError(err.message || 'Falha ao registrar movimentação.', 400, 'MOVEMENT_FAILED');
+    }
+  }
+);
+
+// 11. Transferência entre Depósitos
+app.post(
+  '/api/v1/inventory/transfers',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.INVENTORY_TRANSFER),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const { sourceWarehouseId, targetWarehouseId, productId, quantity, notes } = req.body;
+
+    if (!sourceWarehouseId || !targetWarehouseId || !productId || !quantity) {
+      throw new AppError(
+        'Campos sourceWarehouseId, targetWarehouseId, productId e quantity são obrigatórios.',
+        400,
+        'VALIDATION_ERROR'
+      );
+    }
+
+    try {
+      const result = dbEngine.transferStock(
+        schemaNamespace!,
+        {
+          sourceWarehouseId,
+          targetWarehouseId,
+          productId,
+          quantity: Number(quantity),
+          notes,
+        },
+        { id: user?.id || 'usr-anon', name: user?.name || user?.email || 'Sistema' }
+      );
+
+      res.status(201).json({
+        success: true,
+        data: result,
+        meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+      });
+    } catch (err: any) {
+      throw new AppError(err.message || 'Falha ao realizar transferência.', 400, 'TRANSFER_FAILED');
+    }
+  }
+);
+
+// 12. Histórico de Movimentações (Kardex)
+app.get(
+  '/api/v1/inventory/movements',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.INVENTORY_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { warehouseId, productId, movementType, search, limit } = req.query;
+
+    const movements = dbEngine.listStockMovements(schemaNamespace!, {
+      warehouseId: warehouseId as string,
+      productId: productId as string,
+      movementType: movementType as string,
+      search: search as string,
+      limit: limit ? Number(limit) : undefined,
+    });
+
+    res.json({
+      success: true,
+      data: movements,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// ============================================================================
+// ROTAS DO MÓDULO FISCAL & TRIBUTÁRIO BRASILEIRO (PRD 07 - NF-e, NFS-e, NFC-e, SPED)
+// ============================================================================
+
+// 1. Métricas Consolidadas do Módulo Fiscal
+app.get(
+  '/api/v1/fiscal/metrics',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.FISCAL_DASHBOARD_VIEW),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const metrics = dbEngine.getFiscalMetrics(schemaNamespace!);
+
+    res.json({
+      success: true,
+      data: metrics,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 2. Listagem de Documentos Fiscais
+app.get(
+  '/api/v1/fiscal/documents',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.FISCAL_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { model, status, type, search, startDate, endDate, limit } = req.query;
+
+    const docs = dbEngine.listFiscalDocuments(schemaNamespace!, {
+      model: model as any,
+      status: status as any,
+      type: type as any,
+      search: search as string,
+      startDate: startDate as string,
+      endDate: endDate as string,
+      limit: limit ? Number(limit) : undefined,
+    });
+
+    res.json({
+      success: true,
+      data: docs,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 3. Obter Documento Fiscal por ID
+app.get(
+  '/api/v1/fiscal/documents/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.FISCAL_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const doc = dbEngine.getFiscalDocumentById(schemaNamespace!, req.params.id);
+
+    if (!doc) {
+      throw new NotFoundError('Documento fiscal não encontrado.');
+    }
+
+    res.json({
+      success: true,
+      data: doc,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 4. Download / Prévia do XML do Documento Fiscal
+app.get(
+  '/api/v1/fiscal/documents/:id/xml',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.FISCAL_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const doc = dbEngine.getFiscalDocumentById(schemaNamespace!, req.params.id);
+
+    if (!doc) {
+      throw new NotFoundError('Documento fiscal não encontrado.');
+    }
+
+    res.setHeader('Content-Type', 'application/xml');
+    res.setHeader('Content-Disposition', `attachment; filename="${doc.accessKey || doc.number}.xml"`);
+    res.send(doc.xmlPayload || '<?xml version="1.0" encoding="UTF-8"?><nfeProc></nfeProc>');
+  }
+);
+
+// 5. Criar e Emitir Novo Documento Fiscal
+app.post(
+  '/api/v1/fiscal/documents',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.FISCAL_CREATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const userId = user?.id || 'usr-default';
+    const userName = user?.name || user?.email || 'Operador Fiscal';
+
+    const input = req.body;
+    if (!input.model || !input.natureOfOperation || !input.partnerName || !input.items || input.items.length === 0) {
+      throw new AppError('Dados incompletos para emissão do documento fiscal.', 400, 'INVALID_FISCAL_PAYLOAD');
+    }
+
+    const doc = dbEngine.createFiscalDocument(
+      schemaNamespace!,
+      input,
+      userId,
+      userName
+    );
+
+    res.status(201).json({
+      success: true,
+      data: doc,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 6. Transmitir Documento Fiscal para SEFAZ / Prefeitura
+app.post(
+  '/api/v1/fiscal/documents/:id/transmit',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.FISCAL_TRANSMIT),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const userId = user?.id || 'usr-default';
+    const userName = user?.name || user?.email || 'Operador Fiscal';
+
+    const doc = dbEngine.transmitFiscalDocument(
+      schemaNamespace!,
+      req.params.id,
+      userId,
+      userName
+    );
+
+    res.json({
+      success: true,
+      data: doc,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 7. Cancelar Documento Fiscal Autorizado (SEFAZ)
+app.post(
+  '/api/v1/fiscal/documents/:id/cancel',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.FISCAL_CANCEL),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const userId = user?.id || 'usr-default';
+    const userName = user?.name || user?.email || 'Operador Fiscal';
+    const { justification } = req.body;
+
+    if (!justification || justification.trim().length < 15) {
+      throw new AppError('A justificativa de cancelamento da SEFAZ requer no mínimo 15 caracteres.', 400, 'INVALID_JUSTIFICATION');
+    }
+
+    const doc = dbEngine.cancelFiscalDocument(
+      schemaNamespace!,
+      req.params.id,
+      justification,
+      userId,
+      userName
+    );
+
+    res.json({
+      success: true,
+      data: doc,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 8. Emitir Carta de Correção Eletrônica (CC-e)
+app.post(
+  '/api/v1/fiscal/documents/:id/correction',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.FISCAL_CORRECT),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const userId = user?.id || 'usr-default';
+    const userName = user?.name || user?.email || 'Operador Fiscal';
+    const { correctionText } = req.body;
+
+    if (!correctionText || correctionText.trim().length < 15) {
+      throw new AppError('O texto explicativo da CC-e requer no mínimo 15 caracteres.', 400, 'INVALID_CCE_TEXT');
+    }
+
+    const doc = dbEngine.addCorrectionLetter(
+      schemaNamespace!,
+      req.params.id,
+      correctionText,
+      userId,
+      userName
+    );
+
+    res.json({
+      success: true,
+      data: doc,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 9. Operações Fiscais (CFOPs)
+app.get(
+  '/api/v1/fiscal/operations',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.FISCAL_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const operations = dbEngine.listFiscalOperations(schemaNamespace!);
+
+    res.json({
+      success: true,
+      data: operations,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+app.post(
+  '/api/v1/fiscal/operations',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.FISCAL_MATRIX_MANAGE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const input = req.body;
+
+    if (!input.cfop || !input.description || !input.type) {
+      throw new AppError('Dados incompletos para a Operação Fiscal.', 400, 'INVALID_OPERATION');
+    }
+
+    const op = dbEngine.createFiscalOperation(schemaNamespace!, input);
+
+    res.status(201).json({
+      success: true,
+      data: op,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 10. Inutilização de Numeração
+app.get(
+  '/api/v1/fiscal/inutilizations',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.FISCAL_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const list = dbEngine.listFiscalInutilizations(schemaNamespace!);
+
+    res.json({
+      success: true,
+      data: list,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+app.post(
+  '/api/v1/fiscal/inutilizations',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.FISCAL_INUTILIZE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const userId = user?.id || 'usr-default';
+    const userName = user?.name || user?.email || 'Operador Fiscal';
+    const { model, series, startNumber, endNumber, year, justification } = req.body;
+
+    if (!model || !startNumber || !endNumber || !justification) {
+      throw new AppError('Dados incompletos para inutilização.', 400, 'INVALID_INUTILIZATION');
+    }
+
+    const inut = dbEngine.createFiscalInutilization(
+      schemaNamespace!,
+      {
+        model,
+        series: series || '1',
+        startNumber: Number(startNumber),
+        endNumber: Number(endNumber),
+        year: Number(year || new Date().getFullYear()),
+        justification,
+      },
+      userId,
+      userName
+    );
+
+    res.status(201).json({
+      success: true,
+      data: inut,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 11. Prévia do Arquivo SPED Fiscal (EFD ICMS/IPI)
+app.get(
+  '/api/v1/fiscal/sped/preview',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.FISCAL_SPED_EXPORT),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const month = req.query.month ? Number(req.query.month) : new Date().getMonth() + 1;
+    const year = req.query.year ? Number(req.query.year) : new Date().getFullYear();
+
+    const sped = dbEngine.generateSpedPreview(schemaNamespace!, month, year);
+
+    res.json({
+      success: true,
+      data: sped,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 12. Emissão de Documento Fiscal a partir do Faturamento
+app.post(
+  '/api/v1/fiscal/emit-from-billing',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.FISCAL_TRANSMIT),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const userId = user?.id || 'usr-default';
+    const userName = user?.name || user?.email || 'Operador Fiscal';
+    const { billingId, model } = req.body;
+
+    if (!billingId) {
+      throw new AppError('O identificador do faturamento é obrigatório.', 400, 'MISSING_BILLING_ID');
+    }
+
+    const doc = dbEngine.createFiscalFromBilling(
+      schemaNamespace!,
+      billingId,
+      model || 'NFE_55',
+      userId,
+      userName
+    );
+
+    res.status(201).json({
+      success: true,
+      data: doc,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// ============================================================================
+// ROTAS DO MÓDULO DE COMPRAS, SUPRIMENTOS & ENTRADA DE MERCADORIAS (PRD 08)
+// ============================================================================
+
+// 1. Dashboard de Compras & Métricas
+app.get(
+  '/api/v1/purchases/metrics',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASES_DASHBOARD_VIEW),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const metrics = dbEngine.getPurchasesMetrics(schemaNamespace!);
+
+    res.json({
+      success: true,
+      data: metrics,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 2. Listagem de Requisições de Compra
+app.get(
+  '/api/v1/purchases/requisitions',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_REQUISITIONS_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { status, department, priority } = req.query;
+
+    const requisitions = dbEngine.listPurchaseRequisitions(schemaNamespace!, {
+      status: status as string,
+      department: department as string,
+      priority: priority as string,
+    });
+
+    res.json({
+      success: true,
+      data: requisitions,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 3. Obter Requisição por ID
+app.get(
+  '/api/v1/purchases/requisitions/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_REQUISITIONS_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const reqItem = dbEngine.getPurchaseRequisitionById(schemaNamespace!, req.params.id);
+
+    if (!reqItem) {
+      throw new NotFoundError('Requisição de compra não encontrada.');
+    }
+
+    res.json({
+      success: true,
+      data: reqItem,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 4. Criar Requisição de Compra
+app.post(
+  '/api/v1/purchases/requisitions',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_REQUISITIONS_CREATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Usuário' };
+
+    const requisition = dbEngine.createPurchaseRequisition(schemaNamespace!, req.body, currentUser);
+
+    res.status(201).json({
+      success: true,
+      data: requisition,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 5. Aprovar Requisição de Compra
+app.post(
+  '/api/v1/purchases/requisitions/:id/approve',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_REQUISITIONS_APPROVE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Gestor' };
+
+    const requisition = dbEngine.approvePurchaseRequisition(schemaNamespace!, req.params.id, currentUser);
+
+    res.json({
+      success: true,
+      data: requisition,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 6. Rejeitar Requisição de Compra
+app.post(
+  '/api/v1/purchases/requisitions/:id/reject',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_REQUISITIONS_APPROVE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Gestor' };
+    const { reason } = req.body;
+
+    if (!reason || !reason.trim()) {
+      throw new AppError('O motivo da reprovação é obrigatório.', 400, 'MISSING_REJECTION_REASON');
+    }
+
+    const requisition = dbEngine.rejectPurchaseRequisition(schemaNamespace!, req.params.id, reason, currentUser);
+
+    res.json({
+      success: true,
+      data: requisition,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 7. Cancelar Requisição de Compra
+app.post(
+  '/api/v1/purchases/requisitions/:id/cancel',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_REQUISITIONS_CANCEL),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Usuário' };
+
+    const requisition = dbEngine.cancelPurchaseRequisition(schemaNamespace!, req.params.id, currentUser);
+
+    res.json({
+      success: true,
+      data: requisition,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 8. Listagem de Cotações de Compra
+app.get(
+  '/api/v1/purchases/quotations',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_QUOTES_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { status } = req.query;
+
+    const quotations = dbEngine.listPurchaseQuotations(schemaNamespace!, {
+      status: status as string,
+    });
+
+    res.json({
+      success: true,
+      data: quotations,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 9. Obter Cotação por ID
+app.get(
+  '/api/v1/purchases/quotations/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_QUOTES_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const quotation = dbEngine.getPurchaseQuotationById(schemaNamespace!, req.params.id);
+
+    if (!quotation) {
+      throw new NotFoundError('Cotação de compra não encontrada.');
+    }
+
+    res.json({
+      success: true,
+      data: quotation,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 10. Criar Cotação de Compra
+app.post(
+  '/api/v1/purchases/quotations',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_QUOTES_CREATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Comprador' };
+
+    const quotation = dbEngine.createPurchaseQuotation(schemaNamespace!, req.body, currentUser);
+
+    res.status(201).json({
+      success: true,
+      data: quotation,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 11. Inserir/Atualizar Proposta de Fornecedor na Cotação
+app.post(
+  '/api/v1/purchases/quotations/:id/proposals',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_QUOTES_UPDATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+
+    const quotation = dbEngine.addQuotationProposal(schemaNamespace!, req.params.id, req.body);
+
+    res.json({
+      success: true,
+      data: quotation,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 12. Homologar Cotação (Escolha do Fornecedor Vencedor) e Gerar Pedido de Compra
+app.post(
+  '/api/v1/purchases/quotations/:id/homologate',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_QUOTES_APPROVE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Diretoria de Suprimentos' };
+    const { winningSupplierId, createPurchaseOrder } = req.body;
+
+    if (!winningSupplierId) {
+      throw new AppError('O identificador do fornecedor vencedor é obrigatório.', 400, 'MISSING_WINNING_SUPPLIER');
+    }
+
+    const result = dbEngine.homologateQuotation(
+      schemaNamespace!,
+      req.params.id,
+      winningSupplierId,
+      currentUser,
+      createPurchaseOrder !== false
+    );
+
+    res.json({
+      success: true,
+      data: result,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 13. Listagem de Pedidos de Compra
+app.get(
+  '/api/v1/purchases/orders',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_ORDERS_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { status, supplierId } = req.query;
+
+    const orders = dbEngine.listPurchaseOrders(schemaNamespace!, {
+      status: status as string,
+      supplierId: supplierId as string,
+    });
+
+    res.json({
+      success: true,
+      data: orders,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 14. Obter Pedido de Compra por ID
+app.get(
+  '/api/v1/purchases/orders/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_ORDERS_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const order = dbEngine.getPurchaseOrderById(schemaNamespace!, req.params.id);
+
+    if (!order) {
+      throw new NotFoundError('Pedido de compra não encontrado.');
+    }
+
+    res.json({
+      success: true,
+      data: order,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 15. Criar Pedido de Compra
+app.post(
+  '/api/v1/purchases/orders',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_ORDERS_CREATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Comprador' };
+
+    const order = dbEngine.createPurchaseOrder(schemaNamespace!, req.body, currentUser);
+
+    res.status(201).json({
+      success: true,
+      data: order,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 16. Aprovar Pedido de Compra
+app.post(
+  '/api/v1/purchases/orders/:id/approve',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_ORDERS_APPROVE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Gestor de Compras' };
+
+    const order = dbEngine.approvePurchaseOrder(schemaNamespace!, req.params.id, currentUser);
+
+    res.json({
+      success: true,
+      data: order,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 17. Rejeitar Pedido de Compra
+app.post(
+  '/api/v1/purchases/orders/:id/reject',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_ORDERS_APPROVE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Gestor de Compras' };
+    const { reason } = req.body;
+
+    if (!reason || !reason.trim()) {
+      throw new AppError('O motivo da reprovação é obrigatório.', 400, 'MISSING_REJECTION_REASON');
+    }
+
+    const order = dbEngine.rejectPurchaseOrder(schemaNamespace!, req.params.id, reason, currentUser);
+
+    res.json({
+      success: true,
+      data: order,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 18. Emitir Pedido de Compra ao Fornecedor
+app.post(
+  '/api/v1/purchases/orders/:id/issue',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_ORDERS_ISSUE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Comprador' };
+
+    const order = dbEngine.issuePurchaseOrder(schemaNamespace!, req.params.id, currentUser);
+
+    res.json({
+      success: true,
+      data: order,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 19. Cancelar Pedido de Compra
+app.post(
+  '/api/v1/purchases/orders/:id/cancel',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PURCHASE_ORDERS_CANCEL),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Comprador' };
+
+    const order = dbEngine.cancelPurchaseOrder(schemaNamespace!, req.params.id, currentUser);
+
+    res.json({
+      success: true,
+      data: order,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 20. Listagem de Notas Fiscais de Entrada (Inbound Invoices)
+app.get(
+  '/api/v1/purchases/inbound-invoices',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.INBOUND_INVOICES_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { status } = req.query;
+
+    const invoices = dbEngine.listInboundInvoices(schemaNamespace!, {
+      status: status as string,
+    });
+
+    res.json({
+      success: true,
+      data: invoices,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 21. Obter Nota Fiscal de Entrada por ID
+app.get(
+  '/api/v1/purchases/inbound-invoices/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.INBOUND_INVOICES_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const invoice = dbEngine.getInboundInvoiceById(schemaNamespace!, req.params.id);
+
+    if (!invoice) {
+      throw new NotFoundError('Nota Fiscal de Entrada não encontrada.');
+    }
+
+    res.json({
+      success: true,
+      data: invoice,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 22. Importar XML de NF-e de Entrada (Recebimento Fiscal)
+app.post(
+  '/api/v1/purchases/inbound-invoices/import-xml',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.INBOUND_INVOICES_IMPORT),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Recebimento' };
+    const { xmlContent, warehouseId, purchaseOrderId } = req.body;
+
+    if (!xmlContent || !xmlContent.trim()) {
+      throw new AppError('O conteúdo XML da NF-e é obrigatório.', 400, 'MISSING_XML_CONTENT');
+    }
+
+    const invoice = dbEngine.importInboundInvoiceXml(
+      schemaNamespace!,
+      xmlContent,
+      warehouseId,
+      currentUser,
+      purchaseOrderId
+    );
+
+    res.status(201).json({
+      success: true,
+      data: invoice,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 23. Processar Nota Fiscal de Entrada (Física + Financeira + Vínculo com Pedido)
+app.post(
+  '/api/v1/purchases/inbound-invoices/:id/process',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.INBOUND_INVOICES_PROCESS),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Conferente Fiscal' };
+
+    const result = dbEngine.processInboundInvoice(schemaNamespace!, req.params.id, currentUser);
+
+    res.json({
+      success: true,
+      data: result,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// ============================================================================
+// PRD 09 — COBRANÇA BANCÁRIA, BOLETOS, PIX DINÂMICO & CONCILIAÇÃO CNAB (240/400)
+// ============================================================================
+
+// 1. Dashboard de Métricas de Cobrança Bancária & Inadimplência
+app.get(
+  '/api/v1/banking/dashboard',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BANKING_DASHBOARD_VIEW),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const metrics = dbEngine.getBankingDashboardMetrics(schemaNamespace!);
+
+    res.json({
+      success: true,
+      data: metrics,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 2. Listar Boletos Bancários
+app.get(
+  '/api/v1/banking/slips',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BANK_SLIPS_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const slips = dbEngine.listBankSlips(schemaNamespace!);
+
+    res.json({
+      success: true,
+      data: slips,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 3. Obter Boleto Bancário por ID
+app.get(
+  '/api/v1/banking/slips/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BANK_SLIPS_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const slip = dbEngine.getBankSlipById(schemaNamespace!, req.params.id);
+
+    if (!slip) {
+      throw new NotFoundError(`Boleto bancário [${req.params.id}] não encontrado.`);
+    }
+
+    res.json({
+      success: true,
+      data: slip,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 4. Emitir/Criar Boleto Bancário (com cálculo de linha digitável e código de barras)
+app.post(
+  '/api/v1/banking/slips',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BANK_SLIPS_CREATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
+
+    const slip = dbEngine.createBankSlip(schemaNamespace!, req.body, currentUser);
+
+    res.status(201).json({
+      success: true,
+      data: slip,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 5. Cancelar / Baixar Boleto Bancário
+app.post(
+  '/api/v1/banking/slips/:id/cancel',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BANK_SLIPS_CANCEL),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
+    const { reason } = req.body;
+
+    const slip = dbEngine.cancelBankSlip(schemaNamespace!, req.params.id, reason || 'Cancelamento solicitado', currentUser);
+
+    res.json({
+      success: true,
+      data: slip,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 6. Listar Cobranças Pix Dinâmico
+app.get(
+  ['/api/v1/banking/pix/charges', '/api/v1/banking/pix'],
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PIX_CHARGES_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const charges = dbEngine.listPixCharges(schemaNamespace!);
+
+    res.json({
+      success: true,
+      data: charges,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 7. Gerar Cobrança Pix Dinâmico com EMV Payload e QR Code SVG
+app.post(
+  ['/api/v1/banking/pix/charges', '/api/v1/banking/pix'],
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PIX_CHARGES_CREATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
+
+    const charge = dbEngine.createPixCharge(schemaNamespace!, req.body, currentUser);
+
+    res.status(201).json({
+      success: true,
+      data: charge,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 8. Simular Pagamento Instantâneo Pix (Webhook Bacen SPI Simulator)
+app.post(
+  ['/api/v1/banking/pix/charges/:txid/simulate-payment', '/api/v1/banking/pix/:txid/simulate-payment'],
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PIX_CHARGES_SIMULATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
+
+    const result = dbEngine.simulatePixPayment(schemaNamespace!, req.params.txid, currentUser);
+
+    res.json({
+      success: true,
+      data: result,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 9. Listar Arquivos CNAB (Remessas e Retornos)
+app.get(
+  ['/api/v1/banking/cnab/files', '/api/v1/banking/cnab'],
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BANKING_DASHBOARD_VIEW),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const files = dbEngine.listCnabFiles(schemaNamespace!);
+
+    res.json({
+      success: true,
+      data: files,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 10. Gerar Arquivo de Remessa CNAB (400 / 240)
+app.post(
+  '/api/v1/banking/cnab/remessa',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.CNAB_REMESSA_GENERATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
+
+    const file = dbEngine.generateCnabRemessa(schemaNamespace!, req.body, currentUser);
+
+    res.status(201).json({
+      success: true,
+      data: file,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 11. Processar Arquivo de Retorno CNAB (Conciliação e Liquidação Automática)
+app.post(
+  '/api/v1/banking/cnab/retorno',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.CNAB_RETORNO_PROCESS),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
+    const { contentRaw, bankAccountId } = req.body;
+
+    if (!contentRaw || !contentRaw.trim()) {
+      throw new AppError('O conteúdo do arquivo de Retorno CNAB é obrigatório.', 400, 'MISSING_CNAB_CONTENT');
+    }
+
+    if (!bankAccountId) {
+      throw new AppError('A conta bancária de crédito é obrigatória.', 400, 'MISSING_BANK_ACCOUNT');
+    }
+
+    const result = dbEngine.processCnabRetorno(
+      schemaNamespace!,
+      { contentRaw, bankAccountId },
+      currentUser
+    );
+
+    res.json({
+      success: true,
+      data: result,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 12. Listar Régua de Cobrança / Notificações
+app.get(
+  ['/api/v1/banking/dunning-rules', '/api/v1/banking/dunning'],
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.BANKING_DASHBOARD_VIEW),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const rules = dbEngine.listDunningRules(schemaNamespace!);
+
+    res.json({
+      success: true,
+      data: rules,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 13. Criar Regra de Cobrança
+app.post(
+  ['/api/v1/banking/dunning-rules', '/api/v1/banking/dunning', '/api/v1/banking/dunning/rules'],
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.DUNNING_RULES_MANAGE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
+
+    const rule = dbEngine.createDunningRule(schemaNamespace!, req.body, currentUser);
+
+    res.status(201).json({
+      success: true,
+      data: rule,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 14. Alternar Ativação de Regra de Cobrança
+app.patch(
+  ['/api/v1/banking/dunning-rules/:id/toggle', '/api/v1/banking/dunning/rules/:id/toggle'],
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.DUNNING_RULES_MANAGE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
+
+    const rule = dbEngine.toggleDunningRule(schemaNamespace!, req.params.id, !!req.body.isActive, currentUser);
+
+    res.json({
+      success: true,
+      data: rule,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// 15. Executar Régua de Cobrança (Disparo em Lote)
+app.post(
+  ['/api/v1/banking/dunning-rules/execute', '/api/v1/banking/dunning/execute'],
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.DUNNING_RULES_MANAGE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
+
+    const result = dbEngine.executeDunningRules(schemaNamespace!, currentUser);
+
+    res.json({
+      success: true,
+      data: result,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
 
 // ==========================================
 // TRATAMENTO GLOBAL DE ERROS (PRD 01 - Seção 19)

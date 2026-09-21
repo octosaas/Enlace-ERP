@@ -20,7 +20,12 @@ import { SecurityProfileView } from './ui/views/SecurityProfileView.js';
 import { SecurityEventsView } from './ui/views/SecurityEventsView.js';
 import { CommercialView } from './ui/views/CommercialView.js';
 import { FinancialView } from './ui/views/FinancialView.js';
+import { BillingView } from './ui/views/BillingView.js';
 import { MasterDataView } from './ui/views/MasterDataView.js';
+import { InventoryView } from './ui/views/InventoryView.js';
+import { FiscalView } from './ui/views/FiscalView.js';
+import { ProcurementView } from './ui/views/ProcurementView.js';
+import { BankingView } from './ui/views/BankingView.js';
 import { ShieldCheck } from 'lucide-react';
 
 const AppContent: React.FC = () => {
@@ -79,6 +84,11 @@ const AppContent: React.FC = () => {
         {currentTab === 'masterdata' && <MasterDataView />}
         {currentTab === 'commercial' && <CommercialView />}
         {currentTab === 'financial' && <FinancialView />}
+        {currentTab === 'billing' && <BillingView />}
+        {currentTab === 'inventory' && <InventoryView />}
+        {currentTab === 'fiscal' && <FiscalView />}
+        {currentTab === 'procurement' && <ProcurementView />}
+        {currentTab === 'banking' && <BankingView />}
         {currentTab === 'users' && <UsersManagementView />}
         {currentTab === 'roles' && <RolesAndPermissionsView />}
         {currentTab === 'sessions' && <SessionsView />}
@@ -94,7 +104,7 @@ const AppContent: React.FC = () => {
         <div className="mx-auto max-w-7xl px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
           <span>Enlace ERP • Arquitetura Multi-Tenant com Isolamento por CNPJ</span>
           <span className="font-mono text-[11px] text-slate-400">
-            Fase Atual: PRD 01 a 05 (Multi-Tenant, Governança RBAC, Cadastros, Comercial/Operações e Financeiro/Tesouraria/DRE)
+            Fase Atual: PRD 01 a 09 (Multi-Tenant, Governança RBAC, Cadastros, Comercial, Financeiro, Faturamento, Estoque/WMS, Fiscal, Compras & Cobrança Bancária/Pix)
           </span>
         </div>
       </footer>

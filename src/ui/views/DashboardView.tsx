@@ -24,6 +24,11 @@ import {
   DollarSign,
   ShoppingCart,
   FolderTree,
+  Receipt,
+  Boxes,
+  Landmark,
+  Truck,
+  Banknote,
 } from 'lucide-react';
 
 interface CompanyRecord {
@@ -186,21 +191,21 @@ export const DashboardView: React.FC<{ onNavigateTab: (tab: string) => void }> =
             <span className="text-xs font-medium">Bateria de Segurança & Integridade</span>
             <ShieldCheck className="h-4 w-4 text-emerald-400" />
           </div>
-          <div className="text-base font-bold text-emerald-400">25/25 Aprovados</div>
+          <div className="text-base font-bold text-emerald-400">40/40 Aprovados</div>
           <p className="text-[11px] text-slate-400">
-            Isolamento, IDOR, Anti-Theft, Vault, Cálculos BRL e Conciliação Tesouraria.
+            Isolamento, IDOR, Anti-Theft, Vault, Cálculos BRL, Tesouraria e Recorrência.
           </p>
           <button
             onClick={() => onNavigateTab('security-test')}
             className="text-[11px] text-emerald-400 hover:text-emerald-300 font-medium pt-1 flex items-center gap-1"
           >
-            Ver suíte de 25 testes automatizados →
+            Ver suíte de 40 testes automatizados →
           </button>
         </div>
       </div>
 
-      {/* Módulos de Negócio em Destaque (PRD 03, PRD 04 & PRD 05) */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      {/* Módulos de Negócio em Destaque (PRD 03 a PRD 09) */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <div
           onClick={() => onNavigateTab('masterdata')}
           className="p-4 bg-slate-900/80 border border-slate-800 rounded-xl hover:border-indigo-600/50 cursor-pointer transition flex items-center gap-3"
@@ -210,13 +215,13 @@ export const DashboardView: React.FC<{ onNavigateTab: (tab: string) => void }> =
           </div>
           <div className="flex-1">
             <div className="flex items-center justify-between">
-              <span className="font-semibold text-white text-sm">Cadastros & Contábil (PRD 03)</span>
+              <span className="font-semibold text-white text-sm">Cadastros (PRD 03)</span>
               <span className="text-[10px] rounded bg-indigo-950 border border-indigo-800 px-1.5 py-0.5 text-indigo-400 font-mono">
-                Módulo 11 & COA
+                COA & RFB
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              Parceiros comerciais, validação RFB de CPF/CNPJ, plano de contas e centros de custo.
+              Parceiros comerciais, validação RFB de CPF/CNPJ e plano de contas.
             </p>
           </div>
         </div>
@@ -230,13 +235,13 @@ export const DashboardView: React.FC<{ onNavigateTab: (tab: string) => void }> =
           </div>
           <div className="flex-1">
             <div className="flex items-center justify-between">
-              <span className="font-semibold text-white text-sm">Comercial & Operações (PRD 04)</span>
+              <span className="font-semibold text-white text-sm">Comercial (PRD 04)</span>
               <span className="text-[10px] rounded bg-emerald-950 border border-emerald-800 px-1.5 py-0.5 text-emerald-400 font-mono">
                 Catálogo & OS
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              Orçamentos, pedidos de venda, contratos recorrentes e ordens de serviço.
+              Orçamentos, pedidos de venda, contratos e ordens de serviço.
             </p>
           </div>
         </div>
@@ -250,13 +255,113 @@ export const DashboardView: React.FC<{ onNavigateTab: (tab: string) => void }> =
           </div>
           <div className="flex-1">
             <div className="flex items-center justify-between">
-              <span className="font-semibold text-white text-sm">Financeiro & Tesouraria (PRD 05)</span>
+              <span className="font-semibold text-white text-sm">Financeiro (Tesouraria)</span>
               <span className="text-[10px] rounded bg-blue-950 border border-blue-800 px-1.5 py-0.5 text-blue-400 font-mono">
                 Bancos & DRE
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              Contas a pagar e receber, baixas com juros/multa, conciliação e fluxo de caixa.
+              Contas a pagar e receber, baixas com juros/multa e conciliação.
+            </p>
+          </div>
+        </div>
+
+        <div
+          onClick={() => onNavigateTab('billing')}
+          className="p-4 bg-slate-900/80 border border-slate-800 rounded-xl hover:border-emerald-500/50 cursor-pointer transition flex items-center gap-3"
+        >
+          <div className="p-2.5 bg-emerald-950 text-emerald-400 rounded-lg">
+            <Receipt className="w-5 h-5" />
+          </div>
+          <div className="flex-1">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-white text-sm">Faturamento (PRD 05)</span>
+              <span className="text-[10px] rounded bg-emerald-950 border border-emerald-800 px-1.5 py-0.5 text-emerald-400 font-mono">
+                Recorrência
+              </span>
+            </div>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Documentos de faturamento, competências, recorrência e idempotência.
+            </p>
+          </div>
+        </div>
+
+        <div
+          onClick={() => onNavigateTab('inventory')}
+          className="p-4 bg-slate-900/80 border border-slate-800 rounded-xl hover:border-amber-500/50 cursor-pointer transition flex items-center gap-3"
+        >
+          <div className="p-2.5 bg-amber-950 text-amber-400 rounded-lg">
+            <Boxes className="w-5 h-5" />
+          </div>
+          <div className="flex-1">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-white text-sm">Estoque (PRD 06)</span>
+              <span className="text-[10px] rounded bg-amber-950 border border-amber-800 px-1.5 py-0.5 text-amber-400 font-mono">
+                WMS & CMP
+              </span>
+            </div>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Almoxarifados, saldos pelo Custo Médio, movimentações e rastreio Kardex.
+            </p>
+          </div>
+        </div>
+
+        <div
+          onClick={() => onNavigateTab('fiscal')}
+          className="p-4 bg-slate-900/80 border border-slate-800 rounded-xl hover:border-purple-500/50 cursor-pointer transition flex items-center gap-3"
+        >
+          <div className="p-2.5 bg-purple-950 text-purple-400 rounded-lg">
+            <Landmark className="w-5 h-5" />
+          </div>
+          <div className="flex-1">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-white text-sm">Fiscal & Tributário (PRD 07)</span>
+              <span className="text-[10px] rounded bg-purple-950 border border-purple-800 px-1.5 py-0.5 text-purple-400 font-mono">
+                DF-e & SPED
+              </span>
+            </div>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Emissão de NF-e, NFS-e, NFC-e, transmissão SEFAZ, CC-e e SPED Fiscal EFD.
+            </p>
+          </div>
+        </div>
+
+        <div
+          onClick={() => onNavigateTab('procurement')}
+          className="p-4 bg-slate-900/80 border border-slate-800 rounded-xl hover:border-cyan-500/50 cursor-pointer transition flex items-center gap-3"
+        >
+          <div className="p-2.5 bg-cyan-950 text-cyan-400 rounded-lg">
+            <Truck className="w-5 h-5" />
+          </div>
+          <div className="flex-1">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-white text-sm">Compras & Suprimentos (PRD 08)</span>
+              <span className="text-[10px] rounded bg-cyan-950 border border-cyan-800 px-1.5 py-0.5 text-cyan-400 font-mono">
+                RC, COT & NF-e
+              </span>
+            </div>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Requisições, mapa de cotação com savings, pedidos de compra e recebimento XML.
+            </p>
+          </div>
+        </div>
+
+        <div
+          onClick={() => onNavigateTab('banking')}
+          className="p-4 bg-slate-900/80 border border-slate-800 rounded-xl hover:border-emerald-500/50 cursor-pointer transition flex items-center gap-3"
+        >
+          <div className="p-2.5 bg-emerald-950 text-emerald-400 rounded-lg">
+            <Banknote className="w-5 h-5" />
+          </div>
+          <div className="flex-1">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-white text-sm">Cobrança & Pix (PRD 09)</span>
+              <span className="text-[10px] rounded bg-emerald-950 border border-emerald-800 px-1.5 py-0.5 text-emerald-400 font-mono">
+                CNAB & SPI
+              </span>
+            </div>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Boletos bancários híbridos, Pix Dinâmico, remessa/retorno CNAB 240/400 e régua de cobrança.
             </p>
           </div>
         </div>

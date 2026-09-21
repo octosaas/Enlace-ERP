@@ -966,8 +966,13 @@ export const FinancialView: React.FC = () => {
                         <div className="text-slate-300 truncate max-w-[200px]" title={title.description}>
                           {title.description}
                         </div>
-                        <div className="text-[10px] text-slate-500">
-                          {title.chartOfAccountCode || '1.1.2.01'}
+                        <div className="flex items-center gap-1.5 text-[10px] text-slate-500">
+                          <span>{title.chartOfAccountCode || '1.1.2.01'}</span>
+                          {title.description.includes('Faturamento') && (
+                            <span className="rounded bg-indigo-950/70 border border-indigo-800/60 px-1 py-0.2 text-[9px] text-indigo-300 font-mono">
+                              FATURAMENTO
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td className="py-3 px-4">

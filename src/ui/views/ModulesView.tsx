@@ -17,6 +17,9 @@ import {
   Receipt,
   AlertCircle,
   RefreshCw,
+  Landmark,
+  Truck,
+  Banknote,
 } from 'lucide-react';
 
 interface ModuleItem {
@@ -90,8 +93,14 @@ export const ModulesView: React.FC = () => {
         return <Package className="h-5 w-5 text-amber-400" />;
       case 'sales':
         return <ShoppingCart className="h-5 w-5 text-cyan-400" />;
+      case 'billing':
+        return <Receipt className="h-5 w-5 text-emerald-400" />;
       case 'fiscal':
-        return <Receipt className="h-5 w-5 text-rose-400" />;
+        return <Landmark className="h-5 w-5 text-purple-400" />;
+      case 'purchases':
+        return <Truck className="h-5 w-5 text-indigo-400" />;
+      case 'banking':
+        return <Banknote className="h-5 w-5 text-emerald-400" />;
       default:
         return <Layers className="h-5 w-5 text-slate-400" />;
     }

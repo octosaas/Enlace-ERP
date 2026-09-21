@@ -212,18 +212,40 @@ export class AuthService {
     try {
       const decoded = jwt.verify(token, JWT_SECRET) as AuthSessionPayload;
 
-      // Valida se a sessão ainda está ativa e não foi revogada (PRD 02 - Seção 12)
-      if (decoded.sessionId) {
-        const session = dbEngine.getSession(decoded.sessionId);
-        if (!session || session.isRevoked) {
-          throw new UnauthorizedError('Sessão revogada pelo usuário ou pela administração.');
-        }
-      }
-
       // Valida se o usuário não foi desativado ou suspenso em tempo real
       const user = dbEngine.getUserById(decoded.userId);
       if (!user || user.status !== 'ACTIVE') {
         throw new UnauthorizedError('Acesso bloqueado: o status da conta não permite novas operações.');
+      }
+
+      // Valida se a sessão ainda está ativa e não foi revogada (PRD 02 - Seção 12)
+      if (decoded.sessionId) {
+        if (dbEngine.isSessionRevoked(decoded.sessionId)) {
+          throw new UnauthorizedError('Sessão revogada pelo usuário ou pela administração.');
+        }
+
+        let session = dbEngine.getSession(decoded.sessionId);
+        if (!session) {
+          // Se o processo do servidor foi reiniciado, re-hidrata a sessão ativa
+          // a partir do token criptograficamente válido e não expirado
+          session = dbEngine.createSession({
+            id: decoded.sessionId,
+            userId: user.id,
+            activeCompanyId: decoded.activeCompanyId,
+            tokenHash: crypto.createHash('sha256').update(token).digest('hex'),
+            ipAddress: '127.0.0.1',
+            userAgent: 'Sessão Restaurada',
+            deviceLabel: 'Navegador Web',
+            isRevoked: false,
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+            lastActivityAt: new Date().toISOString(),
+          });
+        }
+
+        if (session.isRevoked) {
+          throw new UnauthorizedError('Sessão revogada pelo usuário ou pela administração.');
+        }
       }
 
       return decoded;

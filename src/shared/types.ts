@@ -228,7 +228,17 @@ export interface SecurityTestResult {
 // ==========================================
 
 export type PersonType = 'PF' | 'PJ' | 'ESTRANGEIRO';
-export type BusinessPartnerRole = 'CLIENTE' | 'FORNECEDOR' | 'TRANSPORTADORA' | 'COLABORADOR' | 'PARCEIRO';
+export type BusinessPartnerRole =
+  | 'CLIENTE'
+  | 'FORNECEDOR'
+  | 'TRANSPORTADORA'
+  | 'COLABORADOR'
+  | 'PARCEIRO'
+  | 'CUSTOMER'
+  | 'SUPPLIER'
+  | 'CARRIER'
+  | 'EMPLOYEE'
+  | 'PARTNER';
 export type PartnerStatus = 'ATIVO' | 'INATIVO' | 'BLOQUEADO';
 
 export interface Address {
@@ -561,9 +571,10 @@ export type RecurringFrequency =
   | 'QUARTERLY'
   | 'SEMIANNUAL'
   | 'YEARLY'
+  | 'ANNUAL'
   | 'CUSTOM';
 
-export type RecurringStatus = 'ACTIVE' | 'SUSPENDED' | 'CANCELED' | 'FINISHED';
+export type RecurringStatus = 'ACTIVE' | 'SUSPENDED' | 'PAUSED' | 'CANCELED' | 'FINISHED';
 
 export type DueRule = 'FIXED_DAY' | 'DAYS_AFTER_ISSUE' | 'DAYS_AFTER_COMPETENCE';
 
@@ -632,9 +643,9 @@ export interface RecurringBillingItem {
   serviceId?: string;
   quantity: number;
   unitPrice: number;
-  discount: number;
-  surcharge: number;
-  total: number;
+  discount?: number;
+  surcharge?: number;
+  total?: number;
 }
 
 export interface RecurringBilling {
@@ -656,6 +667,7 @@ export interface RecurringBilling {
   dueDays: number;
   amount: number;
   description: string;
+  notes?: string;
   items: RecurringBillingItem[];
   lastGeneratedCompetence?: string; // Ex: '09/2026'
   lastGeneratedAt?: string;
@@ -664,8 +676,9 @@ export interface RecurringBilling {
   lastError?: {
     code: string;
     message: string;
-    attemptCount: number;
-    lastAttemptAt: string;
+    attemptCount?: number;
+    lastAttemptAt?: string;
+    timestamp?: string;
   };
   createdAt: string;
   updatedAt: string;
@@ -702,6 +715,17 @@ export interface BillingDashboardMetrics {
   upcomingDueValue: number;
   byCompetence: Array<{ competence: string; total: number; count: number }>;
   bySource: Array<{ sourceType: BillingSourceType; total: number; count: number }>;
+  totalBilledCurrentMonth?: number;
+  totalBilledPreviousMonth?: number;
+  byStatus?: Record<string, number>;
+  bySourceType?: Record<string, number>;
+  pendingCount?: number;
+  pendingValue?: number;
+  issuedCount?: number;
+  issuedValue?: number;
+  canceledCount?: number;
+  canceledValue?: number;
+  monthlyRecurringRevenue?: number;
 }
 
 // ============================================================================
@@ -859,5 +883,686 @@ export interface FinancialDashboardMetrics {
     color?: string;
   }>;
 }
+
+// ============================================================================
+// PRD 06 — GESTÃO DE ESTOQUE & ALMOXARIFADO (WMS BÁSICO)
+// ============================================================================
+
+export interface Warehouse {
+  id: string;
+  companyId: string;
+  code: string; // Ex: 'ALM-01', 'DEP-01'
+  name: string; // Ex: 'Almoxarifado Central', 'Depósito Matriz'
+  description?: string;
+  location?: string; // Ex: 'Galpão Principal - Ala Norte'
+  isDefault: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StockItem {
+  id: string;
+  companyId: string;
+  warehouseId: string;
+  warehouseName: string;
+  productId: string;
+  productCode: string;
+  productName: string;
+  productUnit: string;
+  quantity: number; // Saldo físico real em estoque
+  reservedQuantity: number; // Quantidade reservada em pedidos de venda ou OS
+  availableQuantity: number; // Saldo disponível para movimentação (quantity - reservedQuantity)
+  minQuantity: number; // Estoque mínimo / ponto de reposição
+  maxQuantity: number; // Estoque máximo operacional
+  averageCost: number; // Custo Médio Ponderado (CMP) em BRL
+  lastCost: number; // Último custo unitário de aquisição em BRL
+  totalValue: number; // Valor total patrimonial (quantity * averageCost)
+  locationRack?: string; // Localização física / Endereçamento (ex: 'Rua A / Prateleira 02')
+  updatedAt: string;
+}
+
+export type StockMovementType =
+  | 'INBOUND_PURCHASE' // Entrada por compra / fornecedor
+  | 'INBOUND_ADJUSTMENT' // Entrada por ajuste de inventário / contagem
+  | 'OUTBOUND_SALE' // Saída por faturamento / expedição de venda
+  | 'OUTBOUND_SERVICE_ORDER' // Saída por aplicação de peças em Ordem de Serviço
+  | 'OUTBOUND_ADJUSTMENT' // Saída por perda, avaria ou ajuste negativo
+  | 'TRANSFER_IN' // Entrada decorrente de transferência entre depósitos
+  | 'TRANSFER_OUT' // Saída decorrente de transferência entre depósitos
+  | 'RETURN'; // Devolução de mercadoria
+
+export type StockMovementReferenceType =
+  | 'SALE'
+  | 'PURCHASE'
+  | 'SERVICE_ORDER'
+  | 'TRANSFER'
+  | 'MANUAL'
+  | 'INVENTORY_COUNT';
+
+export interface StockMovement {
+  id: string;
+  companyId: string;
+  movementNumber: string; // Ex: 'MOV-000001'
+  movementType: StockMovementType;
+  productId: string;
+  productCode: string;
+  productName: string;
+  productUnit: string;
+  warehouseId: string;
+  warehouseName: string;
+  targetWarehouseId?: string; // Quando for transferência entre depósitos
+  targetWarehouseName?: string;
+  quantity: number; // Quantidade movimentada (sempre valor absoluto positivo)
+  unitCost: number; // Custo unitário da operação em BRL
+  totalCost: number; // Valor total da movimentação em BRL
+  previousStock: number; // Saldo anterior daquele depósito
+  currentStock: number; // Novo saldo calculado
+  previousAverageCost: number; // CMP anterior
+  newAverageCost: number; // Novo CMP após recálculo
+  referenceType?: StockMovementReferenceType;
+  referenceId?: string; // ID da venda, OS ou compra relacionada
+  referenceDocument?: string; // Ex: 'VEN-000001', 'OS-000002', 'NF-10293'
+  batchNumber?: string; // Número de lote para rastreabilidade
+  expirationDate?: string; // Data de validade (YYYY-MM-DD)
+  notes?: string;
+  createdById: string;
+  createdByName: string;
+  createdAt: string;
+}
+
+export interface StockTransferInput {
+  sourceWarehouseId: string;
+  targetWarehouseId: string;
+  productId: string;
+  quantity: number;
+  notes?: string;
+}
+
+export interface InventoryMetrics {
+  totalItems: number; // Quantidade de SKUs com cadastro de estoque
+  totalStockUnits: number; // Soma de unidades físicas em estoque
+  totalInventoryValue: number; // Valor patrimonial total avaliado a CMP (R$)
+  lowStockCount: number; // Itens em ou abaixo do ponto de reposição
+  outOfStockCount: number; // Itens com estoque zerado
+  movementsCountThisMonth: number; // Total de movimentações no mês vigente
+  activeWarehousesCount: number; // Quantidade de depósitos operacionais
+}
+
+// ============================================================================
+// PRD 07 — MÓDULO FISCAL, TRIBUTAÇÃO BRASILEIRA, EMISSÃO DF-e & SPED
+// ============================================================================
+
+export type FiscalDocumentModel = 'NFE_55' | 'NFSE' | 'NFCE_65';
+export type FiscalDocumentType = 'INBOUND' | 'OUTBOUND';
+export type FiscalDocumentStatus = 'DRAFT' | 'AUTHORIZED' | 'REJECTED' | 'CANCELED' | 'DENIED';
+export type TaxRegime = 'SIMPLES_NACIONAL' | 'LUCRO_PRESUMIDO' | 'LUCRO_REAL';
+
+export interface FiscalOperation {
+  id: string;
+  cfop: string; // Ex: '5.102', '5.405', '5.933', '1.102', '6.102'
+  description: string;
+  type: FiscalDocumentType;
+  applicableRegime: 'ALL' | 'SIMPLES_NACIONAL' | 'REGIME_NORMAL';
+  icmsCst: string; // CSOSN (102, 500) ou CST (00, 40, 60)
+  icmsRate: number; // Alíquota padrão (%)
+  pisCst: string; // CST PIS (01, 07, 49)
+  pisRate: number; // Alíquota padrão (%)
+  cofinsCst: string; // CST COFINS (01, 07, 49)
+  cofinsRate: number; // Alíquota padrão (%)
+  issRate: number; // Alíquota padrão ISS (%)
+  isDefault?: boolean;
+}
+
+export interface FiscalItem {
+  id: string;
+  itemSequence: number; // 1, 2, 3...
+  productId?: string;
+  productCode: string;
+  productName: string;
+  ncm: string; // NCM com 8 dígitos (ex: '8471.30.12')
+  cest?: string; // Código Especificador da ST (quando aplicável)
+  cfop: string; // CFOP específico do item
+  unit: string; // 'UN', 'CX', 'KG', 'SV'
+  quantity: number;
+  unitPrice: number;
+  totalPrice: number; // quantity * unitPrice
+  discount: number;
+  netTotal: number; // totalPrice - discount
+  // Tributos Estaduais (ICMS)
+  icmsCst: string;
+  icmsBase: number;
+  icmsRate: number;
+  icmsValue: number;
+  // Tributos Federais (IPI, PIS, COFINS)
+  ipiCst?: string;
+  ipiBase: number;
+  ipiRate: number;
+  ipiValue: number;
+  pisCst: string;
+  pisBase: number;
+  pisRate: number;
+  pisValue: number;
+  cofinsCst: string;
+  cofinsBase: number;
+  cofinsRate: number;
+  cofinsValue: number;
+  // Tributos Municipais (ISS)
+  serviceCode?: string; // Código da Lista da LC 116/03 (ex: '01.07')
+  issBase: number;
+  issRate: number;
+  issValue: number;
+  issWithheld: boolean;
+  // Transparência Fiscal (IBPT)
+  approximateTaxes: number;
+}
+
+export interface FiscalCorrectionLetter {
+  id: string;
+  sequenceNumber: number; // 1, 2, 3...
+  correctionText: string; // Mínimo 15 caracteres
+  protocolNumber: string;
+  issuedAt: string;
+  issuedByName: string;
+}
+
+export interface FiscalDocument {
+  id: string;
+  companyId: string;
+  model: FiscalDocumentModel;
+  series: string; // Ex: '1'
+  number: number; // Ex: 1001
+  accessKey: string; // 44 dígitos (NF-e/NFC-e) ou Código de Verificação (NFS-e)
+  issueDate: string; // YYYY-MM-DD
+  issueTime: string; // HH:mm:ss
+  type: FiscalDocumentType;
+  status: FiscalDocumentStatus;
+  natureOfOperation: string; // Ex: 'Venda de Mercadoria', 'Prestação de Serviços'
+  cfopPrincipal: string; // Ex: '5.102' ou '5.933'
+  // Dados do Destinatário / Tomador
+  partnerId?: string;
+  partnerName: string;
+  partnerCnpjCpf: string;
+  partnerStateRegistration?: string; // Inscrição Estadual
+  partnerEmail?: string;
+  partnerAddress: {
+    street: string;
+    number: string;
+    complement?: string;
+    neighborhood: string;
+    city: string;
+    state: string;
+    zipCode: string;
+    ibgeCode?: string;
+  };
+  // Itens da Nota
+  items: FiscalItem[];
+  // Totais Consolidados
+  totalProducts: number;
+  totalServices: number;
+  totalDiscounts: number;
+  totalFreight: number;
+  totalInsurance: number;
+  totalOtherExpenses: number;
+  totalTaxableAmount: number;
+  totalICMS: number;
+  totalIPI: number;
+  totalPIS: number;
+  totalCOFINS: number;
+  totalISS: number;
+  totalWithheldTaxes: number; // Retenções (IRRF + INSS + CSLL + PIS/COFINS)
+  totalApproximateTaxes: number; // Lei 12.741/2012
+  netTotal: number; // Valor Total da Nota Fiscal (a pagar)
+  // Protocolos e Rastreabilidade SEFAZ / Prefeitura
+  protocolNumber?: string;
+  authorizedAt?: string;
+  rejectionReason?: string;
+  cancellationReason?: string;
+  canceledAt?: string;
+  correctionLetters: FiscalCorrectionLetter[];
+  // Vínculos Operacionais
+  billingDocumentId?: string;
+  saleId?: string;
+  xmlPayload?: string;
+  additionalInfo?: string;
+  createdById: string;
+  createdByName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FiscalInutilization {
+  id: string;
+  model: FiscalDocumentModel;
+  series: string;
+  startNumber: number;
+  endNumber: number;
+  year: number;
+  justification: string;
+  protocolNumber: string;
+  registeredAt: string;
+  registeredByName: string;
+}
+
+export interface FiscalMetrics {
+  totalAuthorizedValue: number;
+  totalAuthorizedCount: number;
+  countNFe: number;
+  countNFSe: number;
+  countNFCe: number;
+  totalICMSPeriod: number;
+  totalISSPeriod: number;
+  totalPISCOFINSPeriod: number;
+  pendingDraftCount: number;
+  canceledCount: number;
+}
+
+export interface SpedBlockSummary {
+  block: string;
+  name: string;
+  recordCount: number;
+  description: string;
+}
+
+// ============================================================================
+// PRD 08 — MÓDULO DE COMPRAS, SUPRIMENTOS & ENTRADA DE MERCADORIAS (PROCUREMENT)
+// ============================================================================
+
+export type PurchaseRequisitionPriority = 'BAIXA' | 'MEDIA' | 'ALTA' | 'URGENTE';
+
+export type PurchaseRequisitionStatus =
+  | 'RASCUNHO'
+  | 'PENDENTE_APROVACAO'
+  | 'APROVADA'
+  | 'REJEITADA'
+  | 'EM_COTACAO'
+  | 'CONCLUIDA'
+  | 'CANCELADA';
+
+export interface PurchaseRequisitionItem {
+  id: string;
+  productId?: string;
+  productCode?: string;
+  productName: string;
+  quantity: number;
+  unit: string;
+  estimatedUnitPrice: number;
+  estimatedTotalPrice: number;
+  notes?: string;
+}
+
+export interface PurchaseRequisition {
+  id: string;
+  number: string; // Ex: 'RC-000001'
+  requestedById: string;
+  requestedByName: string;
+  department: string;
+  costCenterId?: string;
+  costCenterName?: string;
+  priority: PurchaseRequisitionPriority;
+  status: PurchaseRequisitionStatus;
+  neededByDate: string; // YYYY-MM-DD
+  justification: string;
+  items: PurchaseRequisitionItem[];
+  totalEstimated: number;
+  approvedById?: string;
+  approvedByName?: string;
+  approvedAt?: string;
+  rejectionReason?: string;
+  rejectedAt?: string;
+  purchaseOrderId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type PurchaseQuotationStatus =
+  | 'ABERTA'
+  | 'EM_ANALISE'
+  | 'HOMOLOGADA'
+  | 'CANCELADA';
+
+export interface QuotationItemProposal {
+  itemId: string;
+  productName: string;
+  quantity: number;
+  unit: string;
+  unitPrice: number;
+  discountPercentage: number;
+  icmsPercentage: number;
+  ipiPercentage: number;
+  freightAmount: number;
+  totalPrice: number;
+  deliveryDays: number;
+  isWinning?: boolean;
+}
+
+export interface SupplierQuotationProposal {
+  id: string;
+  supplierId: string;
+  supplierName: string;
+  supplierDocument: string;
+  supplierContact?: string;
+  deliveryDays: number;
+  freightType: 'CIF' | 'FOB';
+  paymentTerm: string;
+  items: QuotationItemProposal[];
+  subtotal: number;
+  freightTotal: number;
+  discountTotal: number;
+  grandTotal: number;
+  notes?: string;
+  submittedAt: string;
+  isOverallWinner?: boolean;
+}
+
+export interface PurchaseQuotation {
+  id: string;
+  number: string; // Ex: 'COT-000001'
+  title: string;
+  requisitionIds: string[];
+  status: PurchaseQuotationStatus;
+  deadlineDate: string; // YYYY-MM-DD
+  items: {
+    id: string;
+    productId?: string;
+    productCode?: string;
+    productName: string;
+    quantity: number;
+    unit: string;
+    targetPrice?: number;
+  }[];
+  proposals: SupplierQuotationProposal[];
+  winningSupplierId?: string;
+  winningSupplierName?: string;
+  totalWinningAmount?: number;
+  savingsAmount?: number;
+  savingsPercentage?: number;
+  homologatedById?: string;
+  homologatedByName?: string;
+  homologatedAt?: string;
+  createdById: string;
+  createdByName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type PurchaseOrderStatus =
+  | 'RASCUNHO'
+  | 'PENDENTE_APROVACAO'
+  | 'APROVADO'
+  | 'REJEITADO'
+  | 'EMITIDO_AO_FORNECEDOR'
+  | 'RECEBIDO_PARCIAL'
+  | 'RECEBIDO_TOTAL'
+  | 'CANCELADO';
+
+export interface PurchaseOrderItem {
+  id: string;
+  productId?: string;
+  productCode?: string;
+  productName: string;
+  quantity: number;
+  quantityReceived: number;
+  unit: string;
+  unitPrice: number;
+  discountAmount: number;
+  aliquotIPI: number;
+  aliquotICMS: number;
+  totalAmount: number;
+}
+
+export interface PurchaseOrder {
+  id: string;
+  number: string; // Ex: 'PC-000001'
+  supplierId: string;
+  supplierName: string;
+  supplierDocument: string;
+  supplierContact?: string;
+  quotationId?: string;
+  requisitionId?: string;
+  status: PurchaseOrderStatus;
+  paymentTerm: string;
+  paymentMethod: PaymentMethod;
+  expectedDeliveryDate: string; // YYYY-MM-DD
+  deliveryAddress: string;
+  warehouseId: string;
+  warehouseName: string;
+  costCenterId?: string;
+  costCenterName?: string;
+  subtotal: number;
+  discountTotal: number;
+  freightTotal: number;
+  taxesTotal: number;
+  grandTotal: number;
+  items: PurchaseOrderItem[];
+  notes?: string;
+  approvedById?: string;
+  approvedByName?: string;
+  approvedAt?: string;
+  rejectionReason?: string;
+  issuedAt?: string;
+  createdById: string;
+  createdByName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type InboundInvoiceStatus =
+  | 'IMPORTADA'
+  | 'PROCESSADA'
+  | 'CANCELADA';
+
+export interface InboundInvoiceItem {
+  id: string;
+  productCodeSupplier: string;
+  productName: string;
+  ncm: string;
+  cfop: string;
+  unit: string;
+  quantity: number;
+  unitPrice: number;
+  totalAmount: number;
+  discountAmount: number;
+  icmsAmount: number;
+  ipiAmount: number;
+  pisAmount: number;
+  cofinsAmount: number;
+  internalProductId?: string;
+  internalProductCode?: string;
+  internalProductName?: string;
+  batchNumber?: string;
+  expirationDate?: string;
+}
+
+export interface InboundInvoiceInstallment {
+  id: string;
+  number: string;
+  dueDate: string; // YYYY-MM-DD
+  amount: number;
+  paymentTitleId?: string;
+}
+
+export interface InboundInvoice {
+  id: string;
+  accessKey: string; // Chave de 44 dígitos da NF-e
+  number: string;
+  series: string;
+  issueDate: string;
+  entryDate: string;
+  supplierId?: string;
+  supplierName: string;
+  supplierDocument: string;
+  supplierStateRegistration?: string;
+  purchaseOrderId?: string;
+  purchaseOrderNumber?: string;
+  warehouseId: string;
+  warehouseName: string;
+  totalProducts: number;
+  totalFreight: number;
+  totalInsurance: number;
+  totalDiscount: number;
+  totalIPI: number;
+  totalICMS: number;
+  totalPIS: number;
+  totalCOFINS: number;
+  netTotal: number;
+  status: InboundInvoiceStatus;
+  items: InboundInvoiceItem[];
+  installments: InboundInvoiceInstallment[];
+  xmlRaw?: string;
+  processedAt?: string;
+  processedByName?: string;
+  createdById: string;
+  createdByName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PurchasesDashboardMetrics {
+  totalSpentPeriod: number;
+  activeOrdersCount: number;
+  pendingRequisitionsCount: number;
+  pendingApprovalOrdersCount: number;
+  averageLeadTimeDays: number;
+  totalQuotationsSavings: number;
+  recentOrders: PurchaseOrder[];
+  topSuppliers: { supplierName: string; totalAmount: number; count: number }[];
+}
+
+// ============================================================================
+// PRD 09 — COBRANÇA BANCÁRIA, BOLETOS, PIX DINÂMICO & CONCILIAÇÃO CNAB (240/400)
+// ============================================================================
+
+export type BankSlipStatus = 'DRAFT' | 'REGISTERED' | 'PAID' | 'CANCELED' | 'OVERDUE';
+
+export interface BankSlip {
+  id: string;
+  ourNumber: string;
+  documentNumber: string;
+  barcode: string;
+  digitableLine: string;
+  bankCode: string;
+  bankName: string;
+  agency: string;
+  account: string;
+  wallet: string;
+  payerName: string;
+  payerDocument: string;
+  payerAddress?: string;
+  beneficiaryName: string;
+  beneficiaryDocument: string;
+  issueDate: string;
+  dueDate: string;
+  amount: number;
+  finePercent: number;
+  interestMonthlyPercent: number;
+  status: BankSlipStatus;
+  paidAmount?: number;
+  paidDate?: string;
+  accountReceivableId?: string;
+  billingDocumentId?: string;
+  instructions?: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type PixKeyType = 'CNPJ' | 'EMAIL' | 'PHONE' | 'EVP';
+export type PixChargeStatus = 'ACTIVE' | 'CONCLUDED' | 'EXPIRED' | 'CANCELED';
+
+export interface PixCharge {
+  id: string;
+  txid: string;
+  accountReceivableId?: string;
+  billingDocumentId?: string;
+  customerName: string;
+  customerDocument: string;
+  description: string;
+  amount: number;
+  keyType: PixKeyType;
+  key: string;
+  emvPayload: string;
+  qrCodeSvg: string;
+  status: PixChargeStatus;
+  expiresAt: string;
+  paidAt?: string;
+  endToEndId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CnabType = 'REMESSA' | 'RETORNO';
+export type CnabStandard = 'CNAB240' | 'CNAB400';
+export type CnabFileStatus = 'GENERATED' | 'TRANSMITTED' | 'PROCESSED' | 'ERROR';
+
+export interface CnabFile {
+  id: string;
+  filename: string;
+  type: CnabType;
+  standard: CnabStandard;
+  bankCode: string;
+  bankName: string;
+  bankAccountId: string;
+  sequenceNumber: number;
+  generationDate: string;
+  totalRecords: number;
+  totalAmount: number;
+  status: CnabFileStatus;
+  contentRaw: string;
+  itemsCount: number;
+  itemsSuccessCount: number;
+  itemsErrorCount: number;
+  processingLog?: string[];
+  createdById: string;
+  createdByName: string;
+  createdAt: string;
+  processedAt?: string;
+}
+
+export type DunningChannel = 'EMAIL' | 'WHATSAPP' | 'SMS';
+
+export interface CollectionDunningRule {
+  id: string;
+  name: string;
+  triggerDays: number;
+  channel: DunningChannel;
+  templateSubject: string;
+  templateBody: string;
+  includePix: boolean;
+  includeBoleto: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BankingDashboardMetrics {
+  totalToCollect: number;
+  totalCollectedMonth: number;
+  defaultRate: number;
+  boletosActiveCount: number;
+  pixActiveCount: number;
+  pendingRemessaCount: number;
+  agingBreakdown: {
+    upTo30Days: number;
+    from31To60Days: number;
+    from61To90Days: number;
+    above90Days: number;
+    onTime: number;
+  };
+  channelPerformance: {
+    boletoVolume: number;
+    pixVolume: number;
+    transferVolume: number;
+  };
+  recentTransactions: {
+    id: string;
+    titleNumber: string;
+    customerName: string;
+    method: 'BOLETO' | 'PIX' | 'TRANSFER';
+    amount: number;
+    date: string;
+    status: string;
+  }[];
+}
+
 
 

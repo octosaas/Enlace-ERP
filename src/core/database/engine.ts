@@ -45,12 +45,81 @@ import {
   CashFlowDay,
   IncomeStatementItem,
   FinancialDashboardMetrics,
+  BillingDocument,
+  BillingItem,
+  BillingDocumentStatus,
+  BillingSourceType,
+  BillingItemType,
+  RecurringFrequency,
+  RecurringStatus,
+  DueRule,
+  RecurringBilling,
+  RecurringBillingItem,
+  BillingGenerationLog,
+  BillingDashboardMetrics,
+  Warehouse,
+  StockItem,
+  StockMovement,
+  StockMovementType,
+  StockMovementReferenceType,
+  StockTransferInput,
+  InventoryMetrics,
+  FiscalDocument,
+  FiscalItem,
+  FiscalDocumentModel,
+  FiscalDocumentStatus,
+  FiscalDocumentType,
+  FiscalOperation,
+  FiscalInutilization,
+  FiscalCorrectionLetter,
+  FiscalMetrics,
+  SpedBlockSummary,
+  TaxRegime,
+  PurchaseRequisition,
+  PurchaseRequisitionItem,
+  PurchaseRequisitionPriority,
+  PurchaseRequisitionStatus,
+  PurchaseQuotation,
+  SupplierQuotationProposal,
+  QuotationItemProposal,
+  PurchaseQuotationStatus,
+  PurchaseOrder,
+  PurchaseOrderItem,
+  PurchaseOrderStatus,
+  InboundInvoice,
+  InboundInvoiceItem,
+  InboundInvoiceInstallment,
+  InboundInvoiceStatus,
+  PurchasesDashboardMetrics,
+  // PRD 09
+  BankSlip,
+  BankSlipStatus,
+  PixCharge,
+  PixChargeStatus,
+  PixKeyType,
+  CnabFile,
+  CnabFileStatus,
+  CnabType,
+  CnabStandard,
+  CollectionDunningRule,
+  DunningChannel,
+  BankingDashboardMetrics,
 } from '../../shared/types.js';
 import { ROLE_DEFAULT_PERMISSIONS } from '../../shared/permissions.js';
 import { cleanDocument, formatDocument } from '../../shared/validators.js';
 import { logger } from '../logger/index.js';
 import { CommercialMath } from '../commercial/commercialEngine.js';
 import { FinancialMath, CashFlowEngine, IncomeStatementEngine } from '../financial/financialEngine.js';
+import {
+  BillingMath,
+  CompetenceHelper,
+  BillingStateMachine,
+  RecurringBillingConcurrencyManager,
+} from '../billing/billingEngine.js';
+import { InventoryMath, InventoryEngine } from '../inventory/inventoryEngine.js';
+import { FiscalMath, FiscalXmlGenerator, SpedFiscalEngine } from '../fiscal/fiscalEngine.js';
+import { ProcurementMath, QuotationComparator, NFeXmlParser } from '../procurement/procurementEngine.js';
+import { BoletoMath, PixEngine, CnabEngine, SUPPORTED_BANKS } from '../banking/bankingEngine.js';
 
 export interface TenantStorage {
   settings: {
@@ -84,6 +153,18 @@ export interface TenantStorage {
     serviceOrder: number;
     receivable: number;
     payable: number;
+    billing: number;
+    inventoryMovement: number;
+    warehouse: number;
+    fiscalNFe: number;
+    fiscalNFSe: number;
+    fiscalNFCe: number;
+    purchaseRequisition: number;
+    purchaseQuotation: number;
+    purchaseOrder: number;
+    inboundInvoice: number;
+    bankSlip: number;
+    cnabRemessa: number;
   };
 
   // PRD 05 - Financeiro e Tesouraria
@@ -91,6 +172,33 @@ export interface TenantStorage {
   accountsPayable: AccountPayable[];
   bankAccounts: BankAccount[];
   bankTransactions: BankTransaction[];
+
+  // PRD PARTE 05 - Faturamento, Competências e Recorrência
+  billingDocuments: BillingDocument[];
+  recurringBillings: RecurringBilling[];
+  billingGenerationLogs: BillingGenerationLog[];
+
+  // PRD 06 - Estoque & Almoxarifado (WMS)
+  warehouses: Warehouse[];
+  stockItems: StockItem[];
+  stockMovements: StockMovement[];
+
+  // PRD 07 - Módulo Fiscal & Tributário Brasileiro (DF-e, SPED)
+  fiscalDocuments: FiscalDocument[];
+  fiscalOperations: FiscalOperation[];
+  fiscalInutilizations: FiscalInutilization[];
+
+  // PRD 08 - Compras, Suprimentos & Entrada de Mercadorias (Procurement)
+  purchaseRequisitions: PurchaseRequisition[];
+  purchaseQuotations: PurchaseQuotation[];
+  purchaseOrders: PurchaseOrder[];
+  inboundInvoices: InboundInvoice[];
+
+  // PRD 09 - Cobrança Bancária, Boletos, Pix & CNAB
+  bankSlips: BankSlip[];
+  pixCharges: PixCharge[];
+  cnabFiles: CnabFile[];
+  dunningRules: CollectionDunningRule[];
 }
 
 export type StoredUser = User & {
@@ -110,6 +218,7 @@ class DatabaseEngine {
 
   // Repositório de Identidade, Sessões & Segurança (PRD 02)
   private sessions = new Map<string, UserSession>();
+  private revokedSessionIds = new Set<string>();
   private refreshTokens = new Map<string, RefreshToken>();
   private invitations = new Map<string, Invitation>();
   private passwordResets = new Map<string, PasswordResetToken>();
@@ -293,7 +402,12 @@ class DatabaseEngine {
         services: true,
         customers: true,
         contracts: true,
-        inventory: false,
+        inventory: true,
+        sales: true,
+        billing: true,
+        fiscal: true,
+        purchases: true,
+        banking: true,
       },
       records: [
         {
@@ -759,6 +873,18 @@ class DatabaseEngine {
         serviceOrder: 1,
         receivable: 3,
         payable: 3,
+        billing: 3,
+        inventoryMovement: 1,
+        warehouse: 2,
+        fiscalNFe: 1001,
+        fiscalNFSe: 501,
+        fiscalNFCe: 2001,
+        purchaseRequisition: 2,
+        purchaseQuotation: 1,
+        purchaseOrder: 1,
+        inboundInvoice: 1,
+        bankSlip: 1,
+        cnabRemessa: 0,
       },
       accountsReceivable: [
         {
@@ -1015,6 +1141,1052 @@ class DatabaseEngine {
           createdAt: new Date(Date.now() - 2 * 86400000).toISOString(),
         },
       ],
+      billingDocuments: [
+        {
+          id: 'fat-alfa-001',
+          instanceId: companyAlfa.schemaNamespace,
+          customerId: 'ptn-alfa-001',
+          customerName: 'Petróleo Brasileiro S.A. - Petrobras',
+          customerDocument: '33.000.167/0001-01',
+          number: 'FAT-000001',
+          status: 'ISSUED',
+          sourceType: 'SALE',
+          sourceId: 'ven-alfa-001',
+          sourceNumber: 'VEN-000001',
+          issueDate: new Date(Date.now() - 5 * 86400000).toISOString().split('T')[0],
+          competenceStart: '2026-09-01',
+          competenceEnd: '2026-09-30',
+          competenceLabel: '09/2026',
+          dueDate: new Date(Date.now() + 25 * 86400000).toISOString().split('T')[0],
+          subtotal: 13000.0,
+          discount: 500.0,
+          surcharge: 0,
+          total: 12500.0,
+          description: 'Faturamento Venda VEN-000001 - Consultoria Cloud e Licenças Enlace',
+          issuedAt: new Date(Date.now() - 5 * 86400000).toISOString(),
+          issuedBy: 'Carlos Santos',
+          createdBy: 'Carlos Santos',
+          createdAt: new Date(Date.now() - 5 * 86400000).toISOString(),
+          updatedAt: new Date(Date.now() - 5 * 86400000).toISOString(),
+          items: [
+            {
+              id: 'item-fat-01',
+              billingId: 'fat-alfa-001',
+              itemType: 'SERVICE',
+              serviceId: 'srv-alfa-01',
+              description: 'Consultoria Especializada em Arquitetura Cloud (40 horas)',
+              quantity: 40,
+              unitPrice: 250.0,
+              discount: 0,
+              surcharge: 0,
+              total: 10000.0,
+              sortOrder: 1,
+              sourceType: 'SALE',
+              sourceId: 'ven-alfa-001',
+            },
+            {
+              id: 'item-fat-02',
+              billingId: 'fat-alfa-001',
+              itemType: 'PRODUCT',
+              productId: 'prd-alfa-01',
+              description: 'Licença Enlace Cloud Enterprise (2 licenças anuais)',
+              quantity: 2,
+              unitPrice: 1500.0,
+              discount: 0,
+              surcharge: 0,
+              total: 3000.0,
+              sortOrder: 2,
+              sourceType: 'SALE',
+              sourceId: 'ven-alfa-001',
+            },
+          ],
+        },
+        {
+          id: 'fat-alfa-002',
+          instanceId: companyAlfa.schemaNamespace,
+          customerId: 'ptn-alfa-001',
+          customerName: 'Petróleo Brasileiro S.A. - Petrobras',
+          customerDocument: '33.000.167/0001-01',
+          number: 'FAT-000002',
+          status: 'ISSUED',
+          sourceType: 'CONTRACT',
+          sourceId: 'ctr-alfa-001',
+          sourceNumber: 'CTR-000001',
+          recurringBillingId: 'rec-bill-alfa-001',
+          issueDate: new Date(Date.now() - 35 * 86400000).toISOString().split('T')[0],
+          competenceStart: '2026-08-01',
+          competenceEnd: '2026-08-31',
+          competenceLabel: '08/2026',
+          dueDate: new Date(Date.now() - 5 * 86400000).toISOString().split('T')[0],
+          subtotal: 8500.0,
+          discount: 0,
+          surcharge: 0,
+          total: 8500.0,
+          description: 'Mensalidade Recorrente Contrato CTR-000001 - Suporte e Sustentação 24x7',
+          issuedAt: new Date(Date.now() - 35 * 86400000).toISOString(),
+          issuedBy: 'Carlos Santos',
+          createdBy: 'Carlos Santos',
+          createdAt: new Date(Date.now() - 35 * 86400000).toISOString(),
+          updatedAt: new Date(Date.now() - 5 * 86400000).toISOString(),
+          items: [
+            {
+              id: 'item-fat-03',
+              billingId: 'fat-alfa-002',
+              itemType: 'SERVICE',
+              description: 'Sustentação Mensal Cloud 24x7 e Monitoramento Contínuo',
+              quantity: 1,
+              unitPrice: 8500.0,
+              discount: 0,
+              surcharge: 0,
+              total: 8500.0,
+              sortOrder: 1,
+              sourceType: 'CONTRACT',
+              sourceId: 'ctr-alfa-001',
+            },
+          ],
+        },
+        {
+          id: 'fat-alfa-003',
+          instanceId: companyAlfa.schemaNamespace,
+          customerId: 'ptn-alfa-003',
+          customerName: 'Juliana Paes de Camargo',
+          customerDocument: '315.421.788-90',
+          number: 'FAT-000003',
+          status: 'PENDING',
+          sourceType: 'MANUAL',
+          issueDate: new Date().toISOString().split('T')[0],
+          competenceStart: '2026-09-01',
+          competenceEnd: '2026-09-30',
+          competenceLabel: '09/2026',
+          dueDate: new Date(Date.now() + 10 * 86400000).toISOString().split('T')[0],
+          subtotal: 3200.0,
+          discount: 0,
+          surcharge: 0,
+          total: 3200.0,
+          description: 'Treinamento Técnico em Arquitetura de Microsserviços para Engenharia',
+          createdBy: 'Carlos Santos',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          items: [
+            {
+              id: 'item-fat-04',
+              billingId: 'fat-alfa-003',
+              itemType: 'SERVICE',
+              description: 'Workshop Hands-on: Clean Architecture & Multi-Tenancy (16h)',
+              quantity: 1,
+              unitPrice: 3200.0,
+              discount: 0,
+              surcharge: 0,
+              total: 3200.0,
+              sortOrder: 1,
+              sourceType: 'MANUAL',
+            },
+          ],
+        },
+      ],
+      recurringBillings: [
+        {
+          id: 'rec-bill-alfa-001',
+          instanceId: companyAlfa.schemaNamespace,
+          customerId: 'ptn-alfa-001',
+          customerName: 'Petróleo Brasileiro S.A. - Petrobras',
+          customerDocument: '33.000.167/0001-01',
+          contractId: 'ctr-alfa-001',
+          contractNumber: 'CTR-000001',
+          status: 'ACTIVE',
+          frequency: 'MONTHLY',
+          startDate: '2026-01-01',
+          nextBillingDate: '2026-09-10',
+          dayOfMonth: 10,
+          dueRule: 'FIXED_DAY',
+          dueDays: 10,
+          amount: 8500.0,
+          description: 'Contrato Recorrente de Sustentação Cloud & SLA 99.99%',
+          items: [
+            {
+              description: 'Sustentação Mensal Cloud 24x7 e Monitoramento Contínuo',
+              itemType: 'SERVICE',
+              quantity: 1,
+              unitPrice: 8500.0,
+              discount: 0,
+              surcharge: 0,
+              total: 8500.0,
+            },
+          ],
+          lastGeneratedCompetence: '08/2026',
+          lastGeneratedAt: new Date(Date.now() - 35 * 86400000).toISOString(),
+          lastGeneratedBillingId: 'fat-alfa-002',
+          lastGeneratedBillingNumber: 'FAT-000002',
+          createdAt: new Date(Date.now() - 180 * 86400000).toISOString(),
+          updatedAt: new Date(Date.now() - 35 * 86400000).toISOString(),
+        },
+      ],
+      billingGenerationLogs: [
+        {
+          id: 'log-gen-alfa-001',
+          instanceId: companyAlfa.schemaNamespace,
+          recurringBillingId: 'rec-bill-alfa-001',
+          competenceStart: '2026-08-01',
+          competenceEnd: '2026-08-31',
+          competenceLabel: '08/2026',
+          billingId: 'fat-alfa-002',
+          billingNumber: 'FAT-000002',
+          status: 'SUCCESS',
+          attemptCount: 1,
+          executedAt: new Date(Date.now() - 35 * 86400000).toISOString(),
+          workerId: 'scheduler-auto-01',
+        },
+      ],
+      warehouses: [
+        {
+          id: 'wh-alfa-01',
+          companyId: companyAlfa.id,
+          code: 'ALM-01',
+          name: 'Almoxarifado Central Matriz',
+          description: 'Estoque principal de licenças, mídias e insumos corporativos',
+          location: 'Matriz São Paulo - Galpão A',
+          isDefault: true,
+          isActive: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        {
+          id: 'wh-alfa-02',
+          companyId: companyAlfa.id,
+          code: 'DEP-02',
+          name: 'Depósito Avançado Filial Campinas',
+          description: 'Depósito para atendimento rápido regional e peças',
+          location: 'Campinas - Setor Logístico',
+          isDefault: false,
+          isActive: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+      stockItems: [
+        {
+          id: 'stk-alfa-01',
+          companyId: companyAlfa.id,
+          warehouseId: 'wh-alfa-01',
+          warehouseName: 'Almoxarifado Central Matriz',
+          productId: 'prd-alfa-01',
+          productCode: 'PRD-001',
+          productName: 'Licença Enlace Cloud Enterprise',
+          productUnit: 'LICENÇA',
+          quantity: 150,
+          reservedQuantity: 10,
+          availableQuantity: 140,
+          minQuantity: 30,
+          maxQuantity: 500,
+          averageCost: 350.0,
+          lastCost: 350.0,
+          totalValue: 52500.0,
+          locationRack: 'Ala Digital / Servidor A1',
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+      stockMovements: [
+        {
+          id: 'mov-alfa-01',
+          companyId: companyAlfa.id,
+          movementNumber: 'MOV-000001',
+          movementType: 'INBOUND_PURCHASE',
+          productId: 'prd-alfa-01',
+          productCode: 'PRD-001',
+          productName: 'Licença Enlace Cloud Enterprise',
+          productUnit: 'LICENÇA',
+          warehouseId: 'wh-alfa-01',
+          warehouseName: 'Almoxarifado Central Matriz',
+          quantity: 150,
+          unitCost: 350.0,
+          totalCost: 52500.0,
+          previousStock: 0,
+          currentStock: 150,
+          previousAverageCost: 0,
+          newAverageCost: 350.0,
+          referenceType: 'PURCHASE',
+          referenceDocument: 'NF-50123',
+          notes: 'Aquisição inicial de lote de licenças corporativas.',
+          createdById: 'usr-001',
+          createdByName: 'Carlos Santos',
+          createdAt: new Date(Date.now() - 30 * 86400000).toISOString(),
+        },
+      ],
+      fiscalOperations: [
+        {
+          id: 'fop-alfa-01',
+          cfop: '5.102',
+          description: 'Venda de mercadoria adquirida de terceiros (Operação interna)',
+          type: 'OUTBOUND',
+          applicableRegime: 'ALL',
+          icmsCst: '102',
+          icmsRate: 18.0,
+          pisCst: '07',
+          pisRate: 0.65,
+          cofinsCst: '07',
+          cofinsRate: 3.0,
+          issRate: 0,
+          isDefault: true,
+        },
+        {
+          id: 'fop-alfa-02',
+          cfop: '5.933',
+          description: 'Prestação de serviço tributado pelo ISSQN (Municipal São Paulo)',
+          type: 'OUTBOUND',
+          applicableRegime: 'ALL',
+          icmsCst: '00',
+          icmsRate: 0,
+          pisCst: '01',
+          pisRate: 0.65,
+          cofinsCst: '01',
+          cofinsRate: 3.0,
+          issRate: 5.0,
+          isDefault: true,
+        },
+        {
+          id: 'fop-alfa-03',
+          cfop: '6.102',
+          description: 'Venda de mercadoria adquirida de terceiros para outro Estado',
+          type: 'OUTBOUND',
+          applicableRegime: 'ALL',
+          icmsCst: '102',
+          icmsRate: 12.0,
+          pisCst: '07',
+          pisRate: 0.65,
+          cofinsCst: '07',
+          cofinsRate: 3.0,
+          issRate: 0,
+        },
+        {
+          id: 'fop-alfa-04',
+          cfop: '1.102',
+          description: 'Compra para comercialização (Entrada de mercadorias)',
+          type: 'INBOUND',
+          applicableRegime: 'ALL',
+          icmsCst: '102',
+          icmsRate: 18.0,
+          pisCst: '50',
+          pisRate: 0.65,
+          cofinsCst: '50',
+          cofinsRate: 3.0,
+          issRate: 0,
+        },
+      ],
+      fiscalDocuments: [
+        {
+          id: 'doc-alfa-01',
+          companyId: companyAlfa.id,
+          model: 'NFE_55',
+          series: '1',
+          number: 1001,
+          accessKey: '35250912345678000195550010000010011849204821',
+          issueDate: new Date(Date.now() - 10 * 86400000).toISOString().split('T')[0],
+          issueTime: '14:22:10',
+          type: 'OUTBOUND',
+          status: 'AUTHORIZED',
+          natureOfOperation: 'Venda de Mercadorias e Softwares',
+          cfopPrincipal: '5.102',
+          partnerId: 'part-alfa-01',
+          partnerName: 'Tech Solutions Brasil Ltda',
+          partnerCnpjCpf: '11.222.333/0001-81',
+          partnerStateRegistration: '110.223.344.556',
+          partnerEmail: 'fiscal@techsolutions.com.br',
+          partnerAddress: {
+            street: 'Av. Brigadeiro Faria Lima',
+            number: '3477',
+            neighborhood: 'Itaim Bibi',
+            city: 'São Paulo',
+            state: 'SP',
+            zipCode: '04538-133',
+            ibgeCode: '3550308',
+          },
+          items: [
+            {
+              id: 'fitem-alfa-01',
+              itemSequence: 1,
+              productId: 'prd-alfa-01',
+              productCode: 'PRD-001',
+              productName: 'Licença Enlace Cloud Enterprise',
+              ncm: '8523.49.90',
+              cfop: '5.102',
+              unit: 'LICENÇA',
+              quantity: 10,
+              unitPrice: 1450.0,
+              totalPrice: 14500.0,
+              discount: 0,
+              netTotal: 14500.0,
+              icmsCst: '102',
+              icmsBase: 14500.0,
+              icmsRate: 18.0,
+              icmsValue: 2610.0,
+              ipiCst: '99',
+              ipiBase: 0,
+              ipiRate: 0,
+              ipiValue: 0,
+              pisCst: '07',
+              pisBase: 14500.0,
+              pisRate: 0.65,
+              pisValue: 94.25,
+              cofinsCst: '07',
+              cofinsBase: 14500.0,
+              cofinsRate: 3.0,
+              cofinsValue: 435.0,
+              issBase: 0,
+              issRate: 0,
+              issValue: 0,
+              issWithheld: false,
+              approximateTaxes: 4567.5,
+            },
+          ],
+          totalProducts: 14500.0,
+          totalServices: 0,
+          totalDiscounts: 0,
+          totalFreight: 0,
+          totalInsurance: 0,
+          totalOtherExpenses: 0,
+          totalTaxableAmount: 14500.0,
+          totalICMS: 2610.0,
+          totalIPI: 0,
+          totalPIS: 94.25,
+          totalCOFINS: 435.0,
+          totalISS: 0,
+          totalWithheldTaxes: 0,
+          totalApproximateTaxes: 4567.5,
+          netTotal: 14500.0,
+          protocolNumber: '135250009182341',
+          authorizedAt: new Date(Date.now() - 10 * 86400000).toISOString(),
+          correctionLetters: [],
+          billingDocumentId: 'bill-alfa-01',
+          saleId: 'sal-alfa-01',
+          additionalInfo: 'Documento fiscal emitido com sucesso em conformidade com o Manual de Orientação do Contribuinte v7.0.',
+          createdById: 'usr-001',
+          createdByName: 'Carlos Santos',
+          createdAt: new Date(Date.now() - 10 * 86400000).toISOString(),
+          updatedAt: new Date(Date.now() - 10 * 86400000).toISOString(),
+        },
+        {
+          id: 'doc-alfa-02',
+          companyId: companyAlfa.id,
+          model: 'NFSE',
+          series: '1',
+          number: 501,
+          accessKey: 'RPS-1-501-849201',
+          issueDate: new Date(Date.now() - 5 * 86400000).toISOString().split('T')[0],
+          issueTime: '10:15:00',
+          type: 'OUTBOUND',
+          status: 'AUTHORIZED',
+          natureOfOperation: 'Prestação de Serviços de Implantação e Consultoria ERP',
+          cfopPrincipal: '5.933',
+          partnerId: 'part-alfa-02',
+          partnerName: 'Logística Express Brasil S.A.',
+          partnerCnpjCpf: '22.333.444/0001-92',
+          partnerEmail: 'contabil@logexpress.com.br',
+          partnerAddress: {
+            street: 'Rua do Porto',
+            number: '1200',
+            neighborhood: 'Vila Leopoldina',
+            city: 'São Paulo',
+            state: 'SP',
+            zipCode: '05303-000',
+            ibgeCode: '3550308',
+          },
+          items: [
+            {
+              id: 'fitem-alfa-02',
+              itemSequence: 1,
+              productCode: 'SRV-001',
+              productName: 'Consultoria Especializada e Setup de Infraestrutura Cloud',
+              ncm: '0000.00.00',
+              cfop: '5.933',
+              unit: 'SV',
+              quantity: 1,
+              unitPrice: 9800.0,
+              totalPrice: 9800.0,
+              discount: 0,
+              netTotal: 9800.0,
+              icmsCst: '00',
+              icmsBase: 0,
+              icmsRate: 0,
+              icmsValue: 0,
+              ipiCst: '99',
+              ipiBase: 0,
+              ipiRate: 0,
+              ipiValue: 0,
+              pisCst: '01',
+              pisBase: 9800.0,
+              pisRate: 0.65,
+              pisValue: 63.7,
+              cofinsCst: '01',
+              cofinsBase: 9800.0,
+              cofinsRate: 3.0,
+              cofinsValue: 294.0,
+              serviceCode: '01.07',
+              issBase: 9800.0,
+              issRate: 5.0,
+              issValue: 490.0,
+              issWithheld: false,
+              approximateTaxes: 1318.1,
+            },
+          ],
+          totalProducts: 0,
+          totalServices: 9800.0,
+          totalDiscounts: 0,
+          totalFreight: 0,
+          totalInsurance: 0,
+          totalOtherExpenses: 0,
+          totalTaxableAmount: 0,
+          totalICMS: 0,
+          totalIPI: 0,
+          totalPIS: 63.7,
+          totalCOFINS: 294.0,
+          totalISS: 490.0,
+          totalWithheldTaxes: 0,
+          totalApproximateTaxes: 1318.1,
+          netTotal: 9800.0,
+          protocolNumber: 'NFSE-SP-2025-998811',
+          authorizedAt: new Date(Date.now() - 5 * 86400000).toISOString(),
+          correctionLetters: [],
+          additionalInfo: 'NFS-e emitida segundo a legislação municipal do Município de São Paulo/SP. Tributação pelo ISSQN alíquota 5%.',
+          createdById: 'usr-001',
+          createdByName: 'Carlos Santos',
+          createdAt: new Date(Date.now() - 5 * 86400000).toISOString(),
+          updatedAt: new Date(Date.now() - 5 * 86400000).toISOString(),
+        },
+        {
+          id: 'doc-alfa-03',
+          companyId: companyAlfa.id,
+          model: 'NFCE_65',
+          series: '1',
+          number: 2001,
+          accessKey: '35250912345678000195650010000020011928374650',
+          issueDate: new Date(Date.now() - 2 * 86400000).toISOString().split('T')[0],
+          issueTime: '16:45:12',
+          type: 'OUTBOUND',
+          status: 'AUTHORIZED',
+          natureOfOperation: 'Venda a Consumidor Final Presencial',
+          cfopPrincipal: '5.102',
+          partnerName: 'Consumidor Final Não Identificado',
+          partnerCnpjCpf: '000.000.000-00',
+          partnerAddress: {
+            street: 'Av. Paulista',
+            number: '1000',
+            neighborhood: 'Bela Vista',
+            city: 'São Paulo',
+            state: 'SP',
+            zipCode: '01310-100',
+          },
+          items: [
+            {
+              id: 'fitem-alfa-03',
+              itemSequence: 1,
+              productCode: 'ITM-ACC-01',
+              productName: 'Token de Segurança Criptográfico USB FIPS-140',
+              ncm: '8523.51.10',
+              cfop: '5.102',
+              unit: 'UN',
+              quantity: 2,
+              unitPrice: 190.0,
+              totalPrice: 380.0,
+              discount: 0,
+              netTotal: 380.0,
+              icmsCst: '102',
+              icmsBase: 380.0,
+              icmsRate: 18.0,
+              icmsValue: 68.4,
+              ipiCst: '99',
+              ipiBase: 0,
+              ipiRate: 0,
+              ipiValue: 0,
+              pisCst: '07',
+              pisBase: 380.0,
+              pisRate: 0.65,
+              pisValue: 2.47,
+              cofinsCst: '07',
+              cofinsBase: 380.0,
+              cofinsRate: 3.0,
+              cofinsValue: 11.4,
+              issBase: 0,
+              issRate: 0,
+              issValue: 0,
+              issWithheld: false,
+              approximateTaxes: 119.7,
+            },
+          ],
+          totalProducts: 380.0,
+          totalServices: 0,
+          totalDiscounts: 0,
+          totalFreight: 0,
+          totalInsurance: 0,
+          totalOtherExpenses: 0,
+          totalTaxableAmount: 380.0,
+          totalICMS: 68.4,
+          totalIPI: 0,
+          totalPIS: 2.47,
+          totalCOFINS: 11.4,
+          totalISS: 0,
+          totalWithheldTaxes: 0,
+          totalApproximateTaxes: 119.7,
+          netTotal: 380.0,
+          protocolNumber: '135250009918239',
+          authorizedAt: new Date(Date.now() - 2 * 86400000).toISOString(),
+          correctionLetters: [],
+          additionalInfo: 'NFC-e emitida em contingência ou modo online com transmissão imediata ao consumidor.',
+          createdById: 'usr-001',
+          createdByName: 'Carlos Santos',
+          createdAt: new Date(Date.now() - 2 * 86400000).toISOString(),
+          updatedAt: new Date(Date.now() - 2 * 86400000).toISOString(),
+        },
+      ],
+      fiscalInutilizations: [
+        {
+          id: 'inut-alfa-01',
+          model: 'NFE_55',
+          series: '1',
+          startNumber: 995,
+          endNumber: 999,
+          year: 2025,
+          justification: 'Inutilização por quebra de sequência decorrente de instabilidade técnica de rede local.',
+          protocolNumber: 'INUT-SEFAZ-SP-2025-139091820',
+          registeredAt: new Date(Date.now() - 15 * 86400000).toISOString(),
+          registeredByName: 'Carlos Santos',
+        },
+      ],
+      purchaseRequisitions: [
+        {
+          id: 'rc-alfa-001',
+          number: 'RC-000001',
+          requestedById: userCarlos.id,
+          requestedByName: userCarlos.name,
+          department: 'Operações e Manutenção Industrial',
+          costCenterId: 'cc-alfa-01',
+          costCenterName: 'Operações Industriais',
+          priority: 'ALTA',
+          status: 'APROVADA',
+          neededByDate: new Date(Date.now() + 10 * 86400000).toISOString().split('T')[0],
+          justification: 'Reposição de bobinas de aço galvanizado e fixadores para a linha de corte e montagem de gabinetes.',
+          items: [
+            {
+              id: 'rc-item-01',
+              productId: 'prd-alfa-01',
+              productCode: 'PRD-ALFA-01',
+              productName: 'Aço Laminado Galvanizado 1.2mm (Bobina)',
+              quantity: 10,
+              unit: 'UN',
+              estimatedUnitPrice: 1850.0,
+              estimatedTotalPrice: 18500.0,
+            },
+            {
+              id: 'rc-item-02',
+              productId: 'prd-alfa-02',
+              productCode: 'PRD-ALFA-02',
+              productName: 'Kit Fixadores e Parafusos Sextavados Inox',
+              quantity: 50,
+              unit: 'UN',
+              estimatedUnitPrice: 45.0,
+              estimatedTotalPrice: 2250.0,
+            },
+          ],
+          totalEstimated: 20750.0,
+          approvedById: userCarlos.id,
+          approvedByName: userCarlos.name,
+          approvedAt: new Date(Date.now() - 3 * 86400000).toISOString(),
+          createdAt: new Date(Date.now() - 4 * 86400000).toISOString(),
+          updatedAt: new Date(Date.now() - 3 * 86400000).toISOString(),
+        },
+        {
+          id: 'rc-alfa-002',
+          number: 'RC-000002',
+          requestedById: userCarlos.id,
+          requestedByName: userCarlos.name,
+          department: 'TI & Infraestrutura Corporativa',
+          costCenterId: 'cc-alfa-02',
+          costCenterName: 'Administração Geral',
+          priority: 'MEDIA',
+          status: 'EM_COTACAO',
+          neededByDate: new Date(Date.now() + 20 * 86400000).toISOString().split('T')[0],
+          justification: 'Aquisição de Monitores Profissionais 27" 4K para a nova equipe de engenharia e projetos.',
+          items: [
+            {
+              id: 'rc-item-03',
+              productCode: 'MON-4K-27',
+              productName: 'Monitor Profissional 27" IPS 4K HDR',
+              quantity: 8,
+              unit: 'UN',
+              estimatedUnitPrice: 2400.0,
+              estimatedTotalPrice: 19200.0,
+            },
+          ],
+          totalEstimated: 19200.0,
+          approvedById: userCarlos.id,
+          approvedByName: userCarlos.name,
+          approvedAt: new Date(Date.now() - 1 * 86400000).toISOString(),
+          createdAt: new Date(Date.now() - 2 * 86400000).toISOString(),
+          updatedAt: new Date(Date.now() - 1 * 86400000).toISOString(),
+        },
+      ],
+      purchaseQuotations: [
+        {
+          id: 'cot-alfa-001',
+          number: 'COT-000001',
+          title: 'Cotação de Aço Galvanizado e Fixadores Industriais',
+          requisitionIds: ['rc-alfa-001'],
+          status: 'HOMOLOGADA',
+          deadlineDate: new Date(Date.now() + 5 * 86400000).toISOString().split('T')[0],
+          items: [
+            {
+              id: 'cot-item-01',
+              productId: 'prd-alfa-01',
+              productCode: 'PRD-ALFA-01',
+              productName: 'Aço Laminado Galvanizado 1.2mm (Bobina)',
+              quantity: 10,
+              unit: 'UN',
+              targetPrice: 1800.0,
+            },
+            {
+              id: 'cot-item-02',
+              productId: 'prd-alfa-02',
+              productCode: 'PRD-ALFA-02',
+              productName: 'Kit Fixadores e Parafusos Sextavados Inox',
+              quantity: 50,
+              unit: 'UN',
+              targetPrice: 40.0,
+            },
+          ],
+          proposals: [
+            {
+              id: 'prop-01',
+              supplierId: 'ptn-alfa-002',
+              supplierName: 'Gerdau Aços Brasil S.A.',
+              supplierDocument: '33.611.500/0001-19',
+              deliveryDays: 7,
+              freightType: 'FOB',
+              paymentTerm: '30 dias direto boleto',
+              items: [
+                {
+                  itemId: 'cot-item-01',
+                  productName: 'Aço Laminado Galvanizado 1.2mm (Bobina)',
+                  unitPrice: 1750.0,
+                  quantity: 10,
+                  unit: 'UN',
+                  discountPercentage: 0,
+                  icmsPercentage: 18,
+                  ipiPercentage: 5,
+                  freightAmount: 300.0,
+                  totalPrice: 17500.0,
+                  deliveryDays: 7,
+                  isWinning: true,
+                },
+                {
+                  itemId: 'cot-item-02',
+                  productName: 'Kit Fixadores e Parafusos Sextavados Inox',
+                  unitPrice: 38.0,
+                  quantity: 50,
+                  unit: 'UN',
+                  discountPercentage: 0,
+                  icmsPercentage: 18,
+                  ipiPercentage: 5,
+                  freightAmount: 50.0,
+                  totalPrice: 1900.0,
+                  deliveryDays: 7,
+                  isWinning: true,
+                },
+              ],
+              subtotal: 19400.0,
+              freightTotal: 350.0,
+              discountTotal: 0,
+              grandTotal: 19750.0,
+              notes: 'Entrega rápida com laudo de qualidade e certificado de conformidade da usina.',
+              submittedAt: new Date(Date.now() - 2 * 86400000).toISOString(),
+              isOverallWinner: true,
+            },
+            {
+              id: 'prop-02',
+              supplierId: 'ptn-alfa-003-csn',
+              supplierName: 'Companhia Siderúrgica Nacional (CSN)',
+              supplierDocument: '33.042.730/0001-04',
+              deliveryDays: 14,
+              freightType: 'FOB',
+              paymentTerm: '28 dias DDL',
+              items: [
+                {
+                  itemId: 'cot-item-01',
+                  productName: 'Aço Laminado Galvanizado 1.2mm (Bobina)',
+                  unitPrice: 1820.0,
+                  quantity: 10,
+                  unit: 'UN',
+                  discountPercentage: 0,
+                  icmsPercentage: 18,
+                  ipiPercentage: 5,
+                  freightAmount: 500.0,
+                  totalPrice: 18200.0,
+                  deliveryDays: 14,
+                  isWinning: false,
+                },
+                {
+                  itemId: 'cot-item-02',
+                  productName: 'Kit Fixadores e Parafusos Sextavados Inox',
+                  unitPrice: 42.0,
+                  quantity: 50,
+                  unit: 'UN',
+                  discountPercentage: 0,
+                  icmsPercentage: 18,
+                  ipiPercentage: 5,
+                  freightAmount: 100.0,
+                  totalPrice: 2100.0,
+                  deliveryDays: 14,
+                  isWinning: false,
+                },
+              ],
+              subtotal: 20300.0,
+              freightTotal: 600.0,
+              discountTotal: 0,
+              grandTotal: 20900.0,
+              notes: 'Prazo estendido em função da escala de laminação.',
+              submittedAt: new Date(Date.now() - 2 * 86400000).toISOString(),
+              isOverallWinner: false,
+            },
+          ],
+          winningSupplierId: 'ptn-alfa-002',
+          winningSupplierName: 'Gerdau Aços Brasil S.A.',
+          totalWinningAmount: 19750.0,
+          savingsAmount: 1150.0,
+          savingsPercentage: 5.5,
+          homologatedById: userCarlos.id,
+          homologatedByName: userCarlos.name,
+          homologatedAt: new Date(Date.now() - 1 * 86400000).toISOString(),
+          createdById: userCarlos.id,
+          createdByName: userCarlos.name,
+          createdAt: new Date(Date.now() - 3 * 86400000).toISOString(),
+          updatedAt: new Date(Date.now() - 1 * 86400000).toISOString(),
+        },
+      ],
+      purchaseOrders: [
+        {
+          id: 'pc-alfa-001',
+          number: 'PC-000001',
+          supplierId: 'ptn-alfa-002',
+          supplierName: 'Gerdau Aços Brasil S.A.',
+          supplierDocument: '33.611.500/0001-19',
+          supplierContact: 'vendas.corporativo@gerdau.com.br - (11) 3094-6600',
+          quotationId: 'cot-alfa-001',
+          requisitionId: 'rc-alfa-001',
+          status: 'EMITIDO_AO_FORNECEDOR',
+          paymentTerm: '30 dias direto boleto',
+          paymentMethod: 'BOLETO',
+          expectedDeliveryDate: new Date(Date.now() + 6 * 86400000).toISOString().split('T')[0],
+          deliveryAddress: 'Rodovia dos Bandeirantes, km 42 - Distrito Industrial, Jundiaí/SP',
+          warehouseId: 'wh-alfa-01',
+          warehouseName: 'Almoxarifado Principal - Matriz',
+          costCenterId: 'cc-alfa-01',
+          costCenterName: 'Operações Industriais',
+          subtotal: 19400.0,
+          discountTotal: 0,
+          freightTotal: 350.0,
+          taxesTotal: 970.0,
+          grandTotal: 20720.0,
+          items: [
+            {
+              id: 'pc-item-01',
+              productId: 'prd-alfa-01',
+              productCode: 'PRD-ALFA-01',
+              productName: 'Aço Laminado Galvanizado 1.2mm (Bobina)',
+              quantity: 10,
+              quantityReceived: 0,
+              unit: 'UN',
+              unitPrice: 1750.0,
+              discountAmount: 0,
+              aliquotIPI: 5,
+              aliquotICMS: 18,
+              totalAmount: 17500.0,
+            },
+            {
+              id: 'pc-item-02',
+              productId: 'prd-alfa-02',
+              productCode: 'PRD-ALFA-02',
+              productName: 'Kit Fixadores e Parafusos Sextavados Inox',
+              quantity: 50,
+              quantityReceived: 0,
+              unit: 'UN',
+              unitPrice: 38.0,
+              discountAmount: 0,
+              aliquotIPI: 5,
+              aliquotICMS: 18,
+              totalAmount: 1900.0,
+            },
+          ],
+          notes: 'Faturar contra CNPJ 12.345.678/0001-95 com menção obrigatória ao Pedido PC-000001.',
+          approvedById: userCarlos.id,
+          approvedByName: userCarlos.name,
+          approvedAt: new Date(Date.now() - 1 * 86400000).toISOString(),
+          issuedAt: new Date(Date.now() - 1 * 86400000).toISOString(),
+          createdById: userCarlos.id,
+          createdByName: userCarlos.name,
+          createdAt: new Date(Date.now() - 1 * 86400000).toISOString(),
+          updatedAt: new Date(Date.now() - 1 * 86400000).toISOString(),
+        },
+      ],
+      inboundInvoices: [
+        {
+          id: 'inb-alfa-001',
+          accessKey: '35260933611500000119550010000045821098765432',
+          number: '4582',
+          series: '1',
+          issueDate: new Date(Date.now() - 1 * 86400000).toISOString().split('T')[0],
+          entryDate: new Date().toISOString().split('T')[0],
+          supplierId: 'ptn-alfa-002',
+          supplierName: 'Gerdau Aços Brasil S.A.',
+          supplierDocument: '33.611.500/0001-19',
+          supplierStateRegistration: '112.345.678.900',
+          purchaseOrderId: 'pc-alfa-001',
+          purchaseOrderNumber: 'PC-000001',
+          warehouseId: 'wh-alfa-01',
+          warehouseName: 'Almoxarifado Principal - Matriz',
+          totalProducts: 9250.0,
+          totalFreight: 0,
+          totalInsurance: 0,
+          totalDiscount: 0,
+          totalIPI: 462.5,
+          totalICMS: 1665.0,
+          totalPIS: 152.62,
+          totalCOFINS: 703.0,
+          netTotal: 9712.5,
+          status: 'IMPORTADA',
+          items: [
+            {
+              id: 'inb-item-01',
+              productCodeSupplier: 'PROD-IND-100',
+              productName: 'Aço Laminado Galvanizado 1.2mm x 1200mm (Bobina)',
+              internalProductId: 'prd-alfa-01',
+              internalProductCode: 'PRD-ALFA-01',
+              ncm: '72104910',
+              cfop: '1101',
+              unit: 'UN',
+              quantity: 5,
+              unitPrice: 1850.0,
+              totalAmount: 9250.0,
+              discountAmount: 0,
+              icmsAmount: 1665.0,
+              ipiAmount: 462.5,
+              pisAmount: 152.62,
+              cofinsAmount: 703.0,
+              batchNumber: 'LOTE-GERDAU-2026-A1',
+            },
+          ],
+          installments: [
+            {
+              id: 'inb-inst-01',
+              number: '001',
+              dueDate: new Date(Date.now() + 29 * 86400000).toISOString().split('T')[0],
+              amount: 9712.5,
+            },
+          ],
+          xmlRaw: '',
+          createdById: userCarlos.id,
+          createdByName: userCarlos.name,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+      bankSlips: [
+        {
+          id: 'bs-alfa-001',
+          ourNumber: '00000000001',
+          documentNumber: 'REC-000001',
+          barcode: '34191100000001250000109000000000010001234500',
+          digitableLine: '34191.09008 00000.000104 00012.345005 1 10000000125000',
+          bankCode: '341',
+          bankName: 'Banco Itaú Unibanco S.A.',
+          agency: '1234',
+          account: '12345-6',
+          wallet: '109',
+          payerName: 'Petróleo Brasileiro S.A. - Petrobras',
+          payerDocument: '33.000.167/0001-01',
+          payerAddress: 'Av. República do Chile, 65 - Centro, Rio de Janeiro - RJ',
+          beneficiaryName: companyAlfa.legalName,
+          beneficiaryDocument: companyAlfa.cnpj,
+          issueDate: new Date(Date.now() - 5 * 86400000).toISOString().split('T')[0],
+          dueDate: new Date(Date.now() + 25 * 86400000).toISOString().split('T')[0],
+          amount: 12500.0,
+          finePercent: 2.0,
+          interestMonthlyPercent: 1.0,
+          status: 'REGISTERED',
+          accountReceivableId: 'rec-alfa-001',
+          instructions: [
+            'NÃO RECEBER APÓS 30 DIAS DO VENCIMENTO.',
+            'APÓS O VENCIMENTO COBRAR MULTA DE 2,0% E JUROS DE 1,0% AO MÊS.',
+          ],
+          createdAt: new Date(Date.now() - 5 * 86400000).toISOString(),
+          updatedAt: new Date(Date.now() - 5 * 86400000).toISOString(),
+        },
+      ],
+      pixCharges: [
+        {
+          id: 'pix-alfa-001',
+          txid: 'ALFA20260901PIX001',
+          accountReceivableId: 'rec-alfa-001',
+          customerName: 'Petróleo Brasileiro S.A. - Petrobras',
+          customerDocument: '33.000.167/0001-01',
+          description: 'Pagamento Fatura REC-000001',
+          amount: 12500.0,
+          keyType: 'CNPJ',
+          key: companyAlfa.cleanCnpj,
+          emvPayload: PixEngine.generatePixPayload({
+            key: companyAlfa.cleanCnpj,
+            amount: 12500.0,
+            merchantName: companyAlfa.legalName,
+            merchantCity: 'SAO PAULO',
+            txid: 'ALFA20260901PIX001',
+            description: 'Fatura REC-000001',
+          }),
+          qrCodeSvg: PixEngine.generateQrCodeSvg('ALFA20260901PIX001'),
+          status: 'ACTIVE',
+          expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(),
+          createdAt: new Date(Date.now() - 5 * 86400000).toISOString(),
+          updatedAt: new Date(Date.now() - 5 * 86400000).toISOString(),
+        },
+      ],
+      cnabFiles: [],
+      dunningRules: [
+        {
+          id: 'dun-01',
+          name: 'Aviso Preventivo de Vencimento',
+          triggerDays: -3,
+          channel: 'EMAIL',
+          templateSubject: 'Lembrete de Vencimento de Fatura - Alfa Soluções',
+          templateBody: 'Prezado cliente, lembramos que sua fatura no valor vence em breve. Segue anexa a 2ª via.',
+          includePix: true,
+          includeBoleto: true,
+          isActive: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        {
+          id: 'dun-02',
+          name: 'Cobrança no Dia do Vencimento',
+          triggerDays: 0,
+          channel: 'WHATSAPP',
+          templateSubject: 'Sua fatura vence hoje!',
+          templateBody: 'Olá! Sua fatura vence hoje. Utilize o código Pix Copia e Cola para pagamento imediato.',
+          includePix: true,
+          includeBoleto: true,
+          isActive: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        {
+          id: 'dun-03',
+          name: 'Aviso de Atraso e Encargos (D+3)',
+          triggerDays: 3,
+          channel: 'EMAIL',
+          templateSubject: 'Aviso de Pendência Financeira - Fatura em Atraso',
+          templateBody: 'Constatamos que a sua fatura ainda não foi liquidada. Por favor, regularize para evitar encargos.',
+          includePix: true,
+          includeBoleto: true,
+          isActive: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ],
     });
 
     this.provisionTenantSchema(companyBeta.schemaNamespace, {
@@ -1031,6 +2203,8 @@ class DatabaseEngine {
         customers: true,
         purchasing: true,
         contracts: false,
+        billing: true,
+        banking: true,
       },
       records: [
         {
@@ -1263,6 +2437,18 @@ class DatabaseEngine {
         serviceOrder: 1,
         receivable: 1,
         payable: 1,
+        billing: 0,
+        inventoryMovement: 1,
+        warehouse: 1,
+        fiscalNFe: 0,
+        fiscalNFSe: 0,
+        fiscalNFCe: 0,
+        purchaseRequisition: 0,
+        purchaseQuotation: 0,
+        purchaseOrder: 0,
+        inboundInvoice: 0,
+        bankSlip: 0,
+        cnabRemessa: 0,
       },
       accountsReceivable: [
         {
@@ -1350,6 +2536,83 @@ class DatabaseEngine {
           createdAt: new Date(Date.now() - 1 * 86400000).toISOString(),
         },
       ],
+      billingDocuments: [],
+      recurringBillings: [],
+      billingGenerationLogs: [],
+      warehouses: [
+        {
+          id: 'wh-beta-01',
+          companyId: companyBeta.id,
+          code: 'DEP-01',
+          name: 'Centro de Distribuição Principal Beta',
+          description: 'Armazenamento de equipamentos de rede, servidores e peças de reposição',
+          location: 'CD Curitiba - Galpão 03',
+          isDefault: true,
+          isActive: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+      stockItems: [
+        {
+          id: 'stk-beta-01',
+          companyId: companyBeta.id,
+          warehouseId: 'wh-beta-01',
+          warehouseName: 'Centro de Distribuição Principal Beta',
+          productId: 'prd-beta-01',
+          productCode: 'PRD-001',
+          productName: 'Servidor Rack Dell PowerEdge R650',
+          productUnit: 'UN',
+          quantity: 24,
+          reservedQuantity: 2,
+          availableQuantity: 22,
+          minQuantity: 5,
+          maxQuantity: 50,
+          averageCost: 19500.0,
+          lastCost: 19500.0,
+          totalValue: 468000.0,
+          locationRack: 'Corredor B / Rack 04',
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+      stockMovements: [
+        {
+          id: 'mov-beta-01',
+          companyId: companyBeta.id,
+          movementNumber: 'MOV-000001',
+          movementType: 'INBOUND_PURCHASE',
+          productId: 'prd-beta-01',
+          productCode: 'PRD-001',
+          productName: 'Servidor Rack Dell PowerEdge R650',
+          productUnit: 'UN',
+          warehouseId: 'wh-beta-01',
+          warehouseName: 'Centro de Distribuição Principal Beta',
+          quantity: 24,
+          unitCost: 19500.0,
+          totalCost: 468000.0,
+          previousStock: 0,
+          currentStock: 24,
+          previousAverageCost: 0,
+          newAverageCost: 19500.0,
+          referenceType: 'PURCHASE',
+          referenceDocument: 'NF-DELL-88910',
+          notes: 'Remessa de importação de servidores para estoque do CD Curitiba.',
+          createdById: 'usr-002',
+          createdByName: 'Mariana Lima',
+          createdAt: new Date(Date.now() - 40 * 86400000).toISOString(),
+        },
+      ],
+      fiscalOperations: [],
+      fiscalDocuments: [],
+      fiscalInutilizations: [],
+      purchaseRequisitions: [],
+      purchaseQuotations: [],
+      purchaseOrders: [],
+      inboundInvoices: [],
+      bankSlips: [],
+      pixCharges: [],
+      cnabFiles: [],
+      dunningRules: [],
     });
 
     // 5. Convite inicial de exemplo para demonstração
@@ -1442,9 +2705,15 @@ class DatabaseEngine {
     return this.sessions.get(sessionId);
   }
 
+  isSessionRevoked(sessionId: string): boolean {
+    if (this.revokedSessionIds.has(sessionId)) return true;
+    const session = this.sessions.get(sessionId);
+    return session ? session.isRevoked : false;
+  }
+
   listSessionsForUser(userId: string, currentSessionId?: string): UserSession[] {
     return Array.from(this.sessions.values())
-      .filter((s) => s.userId === userId && !s.isRevoked)
+      .filter((s) => s.userId === userId && !s.isRevoked && !this.revokedSessionIds.has(s.id))
       .map((s) => ({
         ...s,
         isCurrent: s.id === currentSessionId,
@@ -1453,11 +2722,12 @@ class DatabaseEngine {
   }
 
   revokeSession(sessionId: string): boolean {
+    this.revokedSessionIds.add(sessionId);
     const session = this.sessions.get(sessionId);
-    if (!session) return false;
-
-    session.isRevoked = true;
-    this.sessions.set(sessionId, session);
+    if (session) {
+      session.isRevoked = true;
+      this.sessions.set(sessionId, session);
+    }
 
     // Revoga também refresh tokens atrelados a essa sessão
     for (const [id, rt] of this.refreshTokens.entries()) {
@@ -1475,6 +2745,7 @@ class DatabaseEngine {
       if (session.userId === userId && id !== exceptSessionId && !session.isRevoked) {
         session.isRevoked = true;
         this.sessions.set(id, session);
+        this.revokedSessionIds.add(id);
         count++;
       }
     }
@@ -1610,6 +2881,10 @@ class DatabaseEngine {
     return Array.from(this.companies.values()).find((c) => c.cleanCnpj === cleanCnpj);
   }
 
+  getCompanyBySchemaNamespace(schemaNamespace: string): Company | undefined {
+    return Array.from(this.companies.values()).find((c) => c.schemaNamespace === schemaNamespace);
+  }
+
   listCompaniesForUser(userId: string): Array<{ company: Company; membership: Membership }> {
     const userMemberships = Array.from(this.memberships.values()).filter(
       (m) => m.userId === userId && m.isActive && m.status === 'ACTIVE'
@@ -1700,11 +2975,40 @@ class DatabaseEngine {
           serviceOrder: 0,
           receivable: 0,
           payable: 0,
+          billing: 0,
+          inventoryMovement: 0,
+          warehouse: 0,
+          fiscalNFe: 0,
+          fiscalNFSe: 0,
+          fiscalNFCe: 0,
+          purchaseRequisition: 0,
+          purchaseQuotation: 0,
+          purchaseOrder: 0,
+          inboundInvoice: 0,
+          bankSlip: 0,
+          cnabRemessa: 0,
         },
         accountsReceivable: [],
         accountsPayable: [],
         bankAccounts: [],
         bankTransactions: [],
+        billingDocuments: [],
+        recurringBillings: [],
+        billingGenerationLogs: [],
+        warehouses: [],
+        stockItems: [],
+        stockMovements: [],
+        fiscalDocuments: [],
+        fiscalOperations: [],
+        fiscalInutilizations: [],
+        purchaseRequisitions: [],
+        purchaseQuotations: [],
+        purchaseOrders: [],
+        inboundInvoices: [],
+        bankSlips: [],
+        pixCharges: [],
+        cnabFiles: [],
+        dunningRules: [],
       };
 
       if (!storage.products) storage.products = [];
@@ -1716,8 +3020,80 @@ class DatabaseEngine {
       if (!storage.accountsPayable) storage.accountsPayable = [];
       if (!storage.bankAccounts) storage.bankAccounts = [];
       if (!storage.bankTransactions) storage.bankTransactions = [];
+      if (!storage.billingDocuments) storage.billingDocuments = [];
+      if (!storage.recurringBillings) storage.recurringBillings = [];
+      if (!storage.billingGenerationLogs) storage.billingGenerationLogs = [];
+      if (!storage.warehouses) storage.warehouses = [];
+      if (!storage.stockItems) storage.stockItems = [];
+      if (!storage.stockMovements) storage.stockMovements = [];
+      if (!storage.fiscalDocuments) storage.fiscalDocuments = [];
+      if (!storage.fiscalOperations) storage.fiscalOperations = [];
+      if (!storage.fiscalInutilizations) storage.fiscalInutilizations = [];
+      if (!storage.purchaseRequisitions) storage.purchaseRequisitions = [];
+      if (!storage.purchaseQuotations) storage.purchaseQuotations = [];
+      if (!storage.purchaseOrders) storage.purchaseOrders = [];
+      if (!storage.inboundInvoices) storage.inboundInvoices = [];
+      if (!storage.bankSlips) storage.bankSlips = [];
+      if (!storage.pixCharges) storage.pixCharges = [];
+      if (!storage.cnabFiles) storage.cnabFiles = [];
+      if (!storage.dunningRules) storage.dunningRules = [];
       if (!storage.sequentialCounters) {
-        storage.sequentialCounters = { quote: 0, sale: 0, contract: 0, serviceOrder: 0, receivable: 0, payable: 0 };
+        storage.sequentialCounters = {
+          quote: 0,
+          sale: 0,
+          contract: 0,
+          serviceOrder: 0,
+          receivable: 0,
+          payable: 0,
+          billing: 0,
+          inventoryMovement: 0,
+          warehouse: 0,
+          fiscalNFe: 0,
+          fiscalNFSe: 0,
+          fiscalNFCe: 0,
+          purchaseRequisition: 0,
+          purchaseQuotation: 0,
+          purchaseOrder: 0,
+          inboundInvoice: 0,
+          bankSlip: 0,
+          cnabRemessa: 0,
+        };
+      }
+      if (storage.sequentialCounters.billing === undefined) {
+        storage.sequentialCounters.billing = 0;
+      }
+      if (storage.sequentialCounters.inventoryMovement === undefined) {
+        storage.sequentialCounters.inventoryMovement = 0;
+      }
+      if (storage.sequentialCounters.warehouse === undefined) {
+        storage.sequentialCounters.warehouse = 0;
+      }
+      if (storage.sequentialCounters.fiscalNFe === undefined) {
+        storage.sequentialCounters.fiscalNFe = 0;
+      }
+      if (storage.sequentialCounters.fiscalNFSe === undefined) {
+        storage.sequentialCounters.fiscalNFSe = 0;
+      }
+      if (storage.sequentialCounters.fiscalNFCe === undefined) {
+        storage.sequentialCounters.fiscalNFCe = 0;
+      }
+      if (storage.sequentialCounters.purchaseRequisition === undefined) {
+        storage.sequentialCounters.purchaseRequisition = 0;
+      }
+      if (storage.sequentialCounters.purchaseQuotation === undefined) {
+        storage.sequentialCounters.purchaseQuotation = 0;
+      }
+      if (storage.sequentialCounters.purchaseOrder === undefined) {
+        storage.sequentialCounters.purchaseOrder = 0;
+      }
+      if (storage.sequentialCounters.inboundInvoice === undefined) {
+        storage.sequentialCounters.inboundInvoice = 0;
+      }
+      if (storage.sequentialCounters.bankSlip === undefined) {
+        storage.sequentialCounters.bankSlip = 0;
+      }
+      if (storage.sequentialCounters.cnabRemessa === undefined) {
+        storage.sequentialCounters.cnabRemessa = 0;
       }
 
       this.tenantSchemas.set(schemaNamespace, storage);
@@ -1737,8 +3113,80 @@ class DatabaseEngine {
       if (!storage.accountsPayable) storage.accountsPayable = [];
       if (!storage.bankAccounts) storage.bankAccounts = [];
       if (!storage.bankTransactions) storage.bankTransactions = [];
+      if (!storage.billingDocuments) storage.billingDocuments = [];
+      if (!storage.recurringBillings) storage.recurringBillings = [];
+      if (!storage.billingGenerationLogs) storage.billingGenerationLogs = [];
+      if (!storage.warehouses) storage.warehouses = [];
+      if (!storage.stockItems) storage.stockItems = [];
+      if (!storage.stockMovements) storage.stockMovements = [];
+      if (!storage.fiscalDocuments) storage.fiscalDocuments = [];
+      if (!storage.fiscalOperations) storage.fiscalOperations = [];
+      if (!storage.fiscalInutilizations) storage.fiscalInutilizations = [];
+      if (!storage.purchaseRequisitions) storage.purchaseRequisitions = [];
+      if (!storage.purchaseQuotations) storage.purchaseQuotations = [];
+      if (!storage.purchaseOrders) storage.purchaseOrders = [];
+      if (!storage.inboundInvoices) storage.inboundInvoices = [];
+      if (!storage.bankSlips) storage.bankSlips = [];
+      if (!storage.pixCharges) storage.pixCharges = [];
+      if (!storage.cnabFiles) storage.cnabFiles = [];
+      if (!storage.dunningRules) storage.dunningRules = [];
       if (!storage.sequentialCounters) {
-        storage.sequentialCounters = { quote: 0, sale: 0, contract: 0, serviceOrder: 0, receivable: 0, payable: 0 };
+        storage.sequentialCounters = {
+          quote: 0,
+          sale: 0,
+          contract: 0,
+          serviceOrder: 0,
+          receivable: 0,
+          payable: 0,
+          billing: 0,
+          inventoryMovement: 0,
+          warehouse: 0,
+          fiscalNFe: 0,
+          fiscalNFSe: 0,
+          fiscalNFCe: 0,
+          purchaseRequisition: 0,
+          purchaseQuotation: 0,
+          purchaseOrder: 0,
+          inboundInvoice: 0,
+          bankSlip: 0,
+          cnabRemessa: 0,
+        };
+      }
+      if (storage.sequentialCounters.billing === undefined) {
+        storage.sequentialCounters.billing = 0;
+      }
+      if (storage.sequentialCounters.inventoryMovement === undefined) {
+        storage.sequentialCounters.inventoryMovement = 0;
+      }
+      if (storage.sequentialCounters.warehouse === undefined) {
+        storage.sequentialCounters.warehouse = 0;
+      }
+      if (storage.sequentialCounters.fiscalNFe === undefined) {
+        storage.sequentialCounters.fiscalNFe = 0;
+      }
+      if (storage.sequentialCounters.fiscalNFSe === undefined) {
+        storage.sequentialCounters.fiscalNFSe = 0;
+      }
+      if (storage.sequentialCounters.fiscalNFCe === undefined) {
+        storage.sequentialCounters.fiscalNFCe = 0;
+      }
+      if (storage.sequentialCounters.purchaseRequisition === undefined) {
+        storage.sequentialCounters.purchaseRequisition = 0;
+      }
+      if (storage.sequentialCounters.purchaseQuotation === undefined) {
+        storage.sequentialCounters.purchaseQuotation = 0;
+      }
+      if (storage.sequentialCounters.purchaseOrder === undefined) {
+        storage.sequentialCounters.purchaseOrder = 0;
+      }
+      if (storage.sequentialCounters.inboundInvoice === undefined) {
+        storage.sequentialCounters.inboundInvoice = 0;
+      }
+      if (storage.sequentialCounters.bankSlip === undefined) {
+        storage.sequentialCounters.bankSlip = 0;
+      }
+      if (storage.sequentialCounters.cnabRemessa === undefined) {
+        storage.sequentialCounters.cnabRemessa = 0;
       }
     }
     return storage;
@@ -1752,6 +3200,36 @@ class DatabaseEngine {
         tenant.auditLogs.pop();
       }
     }
+  }
+
+  recordTenantAudit(
+    schemaNamespace: string,
+    action: string,
+    resource: string,
+    resourceId?: string,
+    details?: Record<string, unknown>,
+    userId?: string
+  ) {
+    this.appendTenantAuditLog(schemaNamespace, {
+      id: `aud-${crypto.randomUUID().slice(0, 8)}`,
+      timestamp: new Date().toISOString(),
+      userId: userId || null,
+      userEmail: null,
+      companyId: null,
+      companyCnpj: null,
+      schemaNamespace,
+      action,
+      resource,
+      resourceId,
+      status: 'SUCCESS',
+      requestId: `req-${crypto.randomUUID().slice(0, 8)}`,
+      details,
+    });
+  }
+
+  listTenantAudits(schemaNamespace: string): AuditLogEntry[] {
+    const tenant = this.tenantSchemas.get(schemaNamespace);
+    return tenant ? [...tenant.auditLogs] : [];
   }
 
   updateCompanyModule(companyId: string, moduleCode: string, isEnabled: boolean) {
@@ -3559,6 +5037,4114 @@ class DatabaseEngine {
         color: b.color,
       })),
     };
+  }
+
+  // =======================================================
+  // PRD PARTE 05: MÉTODOS DE FATURAMENTO, COMPETÊNCIA E RECORRÊNCIA
+  // =======================================================
+
+  // 1. Consulta de Documentos de Faturamento com Filtros
+  getBillingDocuments(
+    schemaNamespace: string,
+    filters?: {
+      status?: string;
+      customerId?: string;
+      sourceType?: string;
+      competence?: string;
+      search?: string;
+    }
+  ): BillingDocument[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return [];
+
+    return storage.billingDocuments.filter((doc) => {
+      if (filters?.status && doc.status !== filters.status) return false;
+      if (filters?.customerId && doc.customerId !== filters.customerId) return false;
+      if (filters?.sourceType && doc.sourceType !== filters.sourceType) return false;
+      if (filters?.competence && doc.competenceLabel !== filters.competence) return false;
+      if (filters?.search) {
+        const query = filters.search.toLowerCase();
+        const matchNumber = doc.number.toLowerCase().includes(query);
+        const matchCustomer = doc.customerName?.toLowerCase().includes(query) || false;
+        const matchDoc = doc.customerDocument?.toLowerCase().includes(query) || false;
+        const matchDesc = doc.description?.toLowerCase().includes(query) || false;
+        if (!matchNumber && !matchCustomer && !matchDoc && !matchDesc) return false;
+      }
+      return true;
+    });
+  }
+
+  // 2. Obter Documento de Faturamento por ID
+  getBillingDocumentById(schemaNamespace: string, id: string): BillingDocument | undefined {
+    const storage = this.getTenantStorage(schemaNamespace);
+    return storage?.billingDocuments.find((doc) => doc.id === id);
+  }
+
+  // 3. Criar Documento de Faturamento (Manual ou Direto)
+  createBillingDocument(
+    schemaNamespace: string,
+    data: {
+      customerId: string;
+      customerName?: string;
+      customerDocument?: string;
+      sourceType?: BillingSourceType;
+      sourceId?: string;
+      sourceNumber?: string;
+      recurringBillingId?: string;
+      issueDate?: string;
+      competenceDate?: string;
+      dueDate: string;
+      description?: string;
+      notes?: string;
+      items: Array<{
+        itemType?: BillingItemType;
+        productId?: string;
+        serviceId?: string;
+        description: string;
+        quantity: number;
+        unitPrice: number;
+        discount?: number;
+        surcharge?: number;
+      }>;
+      status?: BillingDocumentStatus;
+    },
+    userId: string,
+    userName: string
+  ): BillingDocument {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Tenant [${schemaNamespace}] não encontrado.`);
+
+    // 1. Contador Sequencial FAT-00000X
+    const counter = (storage.sequentialCounters.billing || 0) + 1;
+    storage.sequentialCounters.billing = counter;
+    const number = `FAT-${String(counter).padStart(6, '0')}`;
+    const billingId = `fat-${crypto.randomUUID().slice(0, 8)}`;
+
+    const issueDate = data.issueDate || new Date().toISOString().split('T')[0];
+    const comp = CompetenceHelper.getCompetenceForDate(data.competenceDate || issueDate);
+
+    // 2. Itens e Cálculos com Matemática Financeira
+    let subtotal = 0;
+    let totalDiscount = 0;
+    let totalSurcharge = 0;
+
+    const items: BillingItem[] = (data.items || []).map((item, idx) => {
+      const calc = BillingMath.calculateItem(
+        item.quantity,
+        item.unitPrice,
+        item.discount || 0,
+        item.surcharge || 0
+      );
+      subtotal = BillingMath.round(subtotal + calc.subtotal);
+      totalDiscount = BillingMath.round(totalDiscount + (item.discount || 0));
+      totalSurcharge = BillingMath.round(totalSurcharge + (item.surcharge || 0));
+
+      return {
+        id: `item-fat-${crypto.randomUUID().slice(0, 8)}`,
+        billingId,
+        itemType: item.itemType || 'SERVICE',
+        productId: item.productId,
+        serviceId: item.serviceId,
+        description: item.description,
+        quantity: item.quantity,
+        unitPrice: BillingMath.round(item.unitPrice),
+        discount: BillingMath.round(item.discount || 0),
+        surcharge: BillingMath.round(item.surcharge || 0),
+        total: calc.total,
+        sortOrder: idx + 1,
+        sourceType: data.sourceType || 'MANUAL',
+        sourceId: data.sourceId,
+      };
+    });
+
+    const total = BillingMath.round(subtotal - totalDiscount + totalSurcharge);
+
+    const doc: BillingDocument = {
+      id: billingId,
+      instanceId: schemaNamespace,
+      customerId: data.customerId,
+      customerName: data.customerName || 'Cliente',
+      customerDocument: data.customerDocument,
+      number,
+      status: data.status || 'PENDING',
+      sourceType: data.sourceType || 'MANUAL',
+      sourceId: data.sourceId,
+      sourceNumber: data.sourceNumber,
+      recurringBillingId: data.recurringBillingId,
+      issueDate,
+      competenceStart: comp.competenceStart,
+      competenceEnd: comp.competenceEnd,
+      competenceLabel: comp.competenceLabel,
+      dueDate: data.dueDate,
+      subtotal,
+      discount: totalDiscount,
+      surcharge: totalSurcharge,
+      total,
+      description: data.description,
+      notes: data.notes,
+      items,
+      createdBy: userName,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (doc.status === 'ISSUED') {
+      doc.issuedAt = new Date().toISOString();
+      doc.issuedBy = userName;
+
+      // Sincronização direta com Contas a Receber (PRD 05)
+      try {
+        const coa = storage.chartOfAccounts.find((c) => c.code.startsWith('3.') || c.nature === 'CREDORA') || storage.chartOfAccounts[0];
+        this.createAccountReceivable(schemaNamespace, {
+          customerId: doc.customerId,
+          customerName: doc.customerName,
+          customerDocument: doc.customerDocument,
+          description: `Faturamento ${doc.number} - ${doc.description || 'Operação Comercial/Serviço'}`,
+          originalValue: doc.total,
+          dueDate: doc.dueDate,
+          issueDate: doc.issueDate,
+          chartOfAccountId: coa?.id || 'coa-rec-default',
+          chartOfAccountCode: coa?.code || '3.1.01',
+          saleId: doc.sourceType === 'SALE' ? doc.sourceId : undefined,
+          saleNumber: doc.sourceType === 'SALE' ? doc.sourceNumber : undefined,
+          contractId: doc.sourceType === 'CONTRACT' ? doc.sourceId : undefined,
+          contractNumber: doc.sourceType === 'CONTRACT' ? doc.sourceNumber : undefined,
+        });
+      } catch {
+        // Silencioso
+      }
+    }
+
+    storage.billingDocuments.unshift(doc);
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'CREATE_BILLING',
+      'BILLING',
+      doc.id,
+      { number: doc.number, total: doc.total, customerId: doc.customerId },
+      userId
+    );
+
+    return doc;
+  }
+
+  // 4. Atualizar Documento de Faturamento (Apenas se PENDING)
+  updateBillingDocument(
+    schemaNamespace: string,
+    id: string,
+    data: Partial<BillingDocument> & { competenceDate?: string },
+    userId: string,
+    userName: string
+  ): BillingDocument {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Tenant [${schemaNamespace}] não encontrado.`);
+
+    const doc = storage.billingDocuments.find((d) => d.id === id);
+    if (!doc) throw new Error(`Documento de faturamento [${id}] não encontrado.`);
+
+    BillingStateMachine.assertEditable(doc);
+
+    if (data.items) {
+      let subtotal = 0;
+      let totalDiscount = 0;
+      let totalSurcharge = 0;
+
+      doc.items = data.items.map((item, idx) => {
+        const calc = BillingMath.calculateItem(
+          item.quantity,
+          item.unitPrice,
+          item.discount || 0,
+          item.surcharge || 0
+        );
+        subtotal = BillingMath.round(subtotal + calc.subtotal);
+        totalDiscount = BillingMath.round(totalDiscount + (item.discount || 0));
+        totalSurcharge = BillingMath.round(totalSurcharge + (item.surcharge || 0));
+
+        return {
+          id: item.id || `item-fat-${crypto.randomUUID().slice(0, 8)}`,
+          billingId: doc.id,
+          itemType: item.itemType || 'SERVICE',
+          productId: item.productId,
+          serviceId: item.serviceId,
+          description: item.description,
+          quantity: item.quantity,
+          unitPrice: BillingMath.round(item.unitPrice),
+          discount: BillingMath.round(item.discount || 0),
+          surcharge: BillingMath.round(item.surcharge || 0),
+          total: calc.total,
+          sortOrder: idx + 1,
+          sourceType: doc.sourceType,
+          sourceId: doc.sourceId,
+        };
+      });
+
+      doc.subtotal = subtotal;
+      doc.discount = totalDiscount;
+      doc.surcharge = totalSurcharge;
+      doc.total = BillingMath.round(subtotal - totalDiscount + totalSurcharge);
+    }
+
+    if (data.dueDate) doc.dueDate = data.dueDate;
+    if (data.description !== undefined) doc.description = data.description;
+    if (data.notes !== undefined) doc.notes = data.notes;
+    if (data.customerName) doc.customerName = data.customerName;
+    if (data.customerDocument) doc.customerDocument = data.customerDocument;
+    if (data.competenceDate) {
+      const comp = CompetenceHelper.getCompetenceForDate(data.competenceDate);
+      doc.competenceStart = comp.competenceStart;
+      doc.competenceEnd = comp.competenceEnd;
+      doc.competenceLabel = comp.competenceLabel;
+    }
+
+    doc.updatedAt = new Date().toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'UPDATE_BILLING',
+      'BILLING',
+      doc.id,
+      { number: doc.number, total: doc.total },
+      userId
+    );
+
+    return doc;
+  }
+
+  // 5. Emitir Documento de Faturamento (Transição para ISSUED)
+  issueBillingDocument(
+    schemaNamespace: string,
+    id: string,
+    userId: string,
+    userName: string
+  ): BillingDocument {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Tenant [${schemaNamespace}] não encontrado.`);
+
+    const doc = storage.billingDocuments.find((d) => d.id === id);
+    if (!doc) throw new Error(`Documento de faturamento [${id}] não encontrado.`);
+
+    if (!BillingStateMachine.canTransition(doc.status, 'ISSUED')) {
+      throw new Error(`Transição de status inválida de ${doc.status} para ISSUED.`);
+    }
+
+    doc.status = 'ISSUED';
+    doc.issuedAt = new Date().toISOString();
+    doc.issuedBy = userName;
+    doc.updatedAt = new Date().toISOString();
+
+    // Sincronização direta com Contas a Receber (PRD 05)
+    try {
+      const coa = storage.chartOfAccounts.find((c) => c.code.startsWith('3.') || c.nature === 'CREDORA') || storage.chartOfAccounts[0];
+      this.createAccountReceivable(schemaNamespace, {
+        customerId: doc.customerId,
+        customerName: doc.customerName,
+        customerDocument: doc.customerDocument,
+        description: `Faturamento ${doc.number} - ${doc.description || 'Operação Comercial/Serviço'}`,
+        originalValue: doc.total,
+        dueDate: doc.dueDate,
+        issueDate: doc.issueDate,
+        chartOfAccountId: coa?.id || 'coa-rec-default',
+        chartOfAccountCode: coa?.code || '3.1.01',
+        saleId: doc.sourceType === 'SALE' ? doc.sourceId : undefined,
+        saleNumber: doc.sourceType === 'SALE' ? doc.sourceNumber : undefined,
+        contractId: doc.sourceType === 'CONTRACT' ? doc.sourceId : undefined,
+        contractNumber: doc.sourceType === 'CONTRACT' ? doc.sourceNumber : undefined,
+      });
+    } catch {
+      // Silencioso
+    }
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'ISSUE_BILLING',
+      'BILLING',
+      doc.id,
+      { number: doc.number, total: doc.total },
+      userId
+    );
+
+    return doc;
+  }
+
+  // 6. Cancelar Documento de Faturamento (PRD Seção 38 - Motivo Obrigatório)
+  cancelBillingDocument(
+    schemaNamespace: string,
+    id: string,
+    reason: string,
+    userId: string,
+    userName: string
+  ): BillingDocument {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Tenant [${schemaNamespace}] não encontrado.`);
+
+    const doc = storage.billingDocuments.find((d) => d.id === id);
+    if (!doc) throw new Error(`Documento de faturamento [${id}] não encontrado.`);
+
+    if (!reason || reason.trim().length < 5) {
+      throw new Error('Motivo de cancelamento é obrigatório e deve ter no mínimo 5 caracteres.');
+    }
+
+    if (!BillingStateMachine.canTransition(doc.status, 'CANCELED')) {
+      throw new Error(`Transição de status inválida de ${doc.status} para CANCELED.`);
+    }
+
+    doc.status = 'CANCELED';
+    doc.cancellationReason = reason.trim();
+    doc.canceledAt = new Date().toISOString();
+    doc.canceledBy = userName;
+    doc.updatedAt = new Date().toISOString();
+
+    // Estorno coordenado de título em contas a receber caso em aberto
+    const linkedRec = storage.accountsReceivable.find(
+      (r) => r.description.includes(doc.number) && r.status === 'OPEN'
+    );
+    if (linkedRec) {
+      linkedRec.status = 'CANCELED';
+    }
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'CANCEL_BILLING',
+      'BILLING',
+      doc.id,
+      { number: doc.number, reason: doc.cancellationReason },
+      userId
+    );
+
+    return doc;
+  }
+
+  // 7. Faturar Pedido de Venda (Idempotente & Snapshot de Itens)
+  createBillingFromSale(
+    schemaNamespace: string,
+    saleId: string,
+    userId: string,
+    userName: string
+  ): BillingDocument {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Tenant [${schemaNamespace}] não encontrado.`);
+
+    const sale = storage.sales.find((s) => s.id === saleId);
+    if (!sale) throw new Error(`Pedido de venda [${saleId}] não encontrado.`);
+
+    // Verificação de duplicidade (não faturar duas vezes a mesma venda ativa)
+    const existing = storage.billingDocuments.find(
+      (b) => b.sourceType === 'SALE' && b.sourceId === saleId && b.status !== 'CANCELED'
+    );
+    if (existing) {
+      throw new Error(`O pedido de venda ${sale.number} já foi faturado no documento ${existing.number}.`);
+    }
+
+    const dueDate = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
+
+    return this.createBillingDocument(
+      schemaNamespace,
+      {
+        customerId: sale.customerId,
+        customerName: sale.customerName,
+        customerDocument: sale.customerDocument,
+        sourceType: 'SALE',
+        sourceId: sale.id,
+        sourceNumber: sale.number,
+        issueDate: new Date().toISOString().split('T')[0],
+        competenceDate: sale.saleDate,
+        dueDate,
+        description: `Faturamento Pedido de Venda ${sale.number}`,
+        items: sale.items.map((it) => ({
+          itemType: it.itemType,
+          productId: it.productId,
+          serviceId: it.serviceId,
+          description: it.description,
+          quantity: it.quantity,
+          unitPrice: it.unitPrice,
+          discount: it.discount,
+          surcharge: it.surcharge,
+        })),
+        status: 'ISSUED',
+      },
+      userId,
+      userName
+    );
+  }
+
+  // 8. Faturar Ordem de Serviço (Idempotente & Snapshot de Itens)
+  createBillingFromServiceOrder(
+    schemaNamespace: string,
+    osId: string,
+    userId: string,
+    userName: string
+  ): BillingDocument {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Tenant [${schemaNamespace}] não encontrado.`);
+
+    const os = storage.serviceOrders.find((o) => o.id === osId);
+    if (!os) throw new Error(`Ordem de serviço [${osId}] não encontrada.`);
+
+    const existing = storage.billingDocuments.find(
+      (b) => b.sourceType === 'SERVICE_ORDER' && b.sourceId === osId && b.status !== 'CANCELED'
+    );
+    if (existing) {
+      throw new Error(`A ordem de serviço ${os.number} já foi faturada no documento ${existing.number}.`);
+    }
+
+    const dueDate = new Date(Date.now() + 15 * 86400000).toISOString().split('T')[0];
+    const items = (os.items && os.items.length > 0)
+      ? os.items.map((it) => ({
+          itemType: (it.itemType || 'SERVICE') as BillingItemType,
+          productId: undefined,
+          serviceId: it.serviceId,
+          description: it.description,
+          quantity: it.quantity,
+          unitPrice: it.unitPrice,
+          discount: 0,
+          surcharge: 0,
+        }))
+      : [
+          {
+            itemType: 'SERVICE' as BillingItemType,
+            description: `Execução de OS: ${os.title}`,
+            quantity: 1,
+            unitPrice: 500.0,
+            discount: 0,
+            surcharge: 0,
+          },
+        ];
+
+    return this.createBillingDocument(
+      schemaNamespace,
+      {
+        customerId: os.customerId,
+        customerName: os.customerName,
+        customerDocument: os.customerDocument,
+        sourceType: 'SERVICE_ORDER',
+        sourceId: os.id,
+        sourceNumber: os.number,
+        issueDate: new Date().toISOString().split('T')[0],
+        dueDate,
+        description: `Faturamento Ordem de Serviço ${os.number} - ${os.title}`,
+        items,
+        status: 'ISSUED',
+      },
+      userId,
+      userName
+    );
+  }
+
+  // 9. Dashboard de Faturamento (Métricas e Agrupamentos)
+  getBillingDashboard(schemaNamespace: string): BillingDashboardMetrics {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) {
+      return {
+        totalIssuedValue: 0,
+        totalIssuedCount: 0,
+        totalCanceledValue: 0,
+        totalCanceledCount: 0,
+        totalPendingValue: 0,
+        totalPendingCount: 0,
+        totalDraftCount: 0,
+        activeRecurringCount: 0,
+        activeRecurringMonthlyValue: 0,
+        upcomingDueCount: 0,
+        upcomingDueValue: 0,
+        byCompetence: [],
+        bySource: [],
+        totalBilledCurrentMonth: 0,
+        totalBilledPreviousMonth: 0,
+        pendingCount: 0,
+        pendingValue: 0,
+        issuedCount: 0,
+        issuedValue: 0,
+        canceledCount: 0,
+        canceledValue: 0,
+        monthlyRecurringRevenue: 0,
+        byStatus: { PENDING: 0, ISSUED: 0, CANCELED: 0 },
+        bySourceType: { SALE: 0, CONTRACT: 0, SERVICE_ORDER: 0, MANUAL: 0 },
+      };
+    }
+
+    const now = new Date();
+    const currentComp = CompetenceHelper.getCompetenceForDate(now.toISOString());
+    const prevMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 15);
+    const prevComp = CompetenceHelper.getCompetenceForDate(prevMonthDate.toISOString());
+
+    let totalBilledCurrentMonth = 0;
+    let totalBilledPreviousMonth = 0;
+    let pendingCount = 0;
+    let pendingValue = 0;
+    let issuedCount = 0;
+    let issuedValue = 0;
+    let canceledCount = 0;
+    let canceledValue = 0;
+
+    const byStatus = { PENDING: 0, ISSUED: 0, CANCELED: 0 };
+    const bySourceType: Record<string, number> = { SALE: 0, CONTRACT: 0, SERVICE_ORDER: 0, MANUAL: 0 };
+
+    for (const doc of storage.billingDocuments) {
+      if (doc.status === 'PENDING') {
+        pendingCount++;
+        pendingValue = BillingMath.round(pendingValue + doc.total);
+        byStatus.PENDING++;
+      } else if (doc.status === 'ISSUED') {
+        issuedCount++;
+        issuedValue = BillingMath.round(issuedValue + doc.total);
+        byStatus.ISSUED++;
+
+        if (doc.competenceLabel === currentComp.competenceLabel) {
+          totalBilledCurrentMonth = BillingMath.round(totalBilledCurrentMonth + doc.total);
+        } else if (doc.competenceLabel === prevComp.competenceLabel) {
+          totalBilledPreviousMonth = BillingMath.round(totalBilledPreviousMonth + doc.total);
+        }
+      } else if (doc.status === 'CANCELED') {
+        canceledCount++;
+        canceledValue = BillingMath.round(canceledValue + doc.total);
+        byStatus.CANCELED++;
+      }
+
+      bySourceType[doc.sourceType] = (bySourceType[doc.sourceType] || 0) + 1;
+    }
+
+    const activeRecurrings = storage.recurringBillings.filter((r) => r.status === 'ACTIVE');
+    const activeRecurringCount = activeRecurrings.length;
+    let monthlyRecurringRevenue = 0;
+
+    for (const rec of activeRecurrings) {
+      if (rec.frequency === 'MONTHLY') {
+        monthlyRecurringRevenue = BillingMath.round(monthlyRecurringRevenue + rec.amount);
+      } else if (rec.frequency === 'QUARTERLY') {
+        monthlyRecurringRevenue = BillingMath.round(monthlyRecurringRevenue + (rec.amount / 3));
+      } else if (rec.frequency === 'SEMIANNUAL') {
+        monthlyRecurringRevenue = BillingMath.round(monthlyRecurringRevenue + (rec.amount / 6));
+      } else if (rec.frequency === 'YEARLY') {
+        monthlyRecurringRevenue = BillingMath.round(monthlyRecurringRevenue + (rec.amount / 12));
+      }
+    }
+
+    const bySource: Array<{ sourceType: BillingSourceType; total: number; count: number }> = [
+      { sourceType: 'SALE', total: 0, count: bySourceType.SALE || 0 },
+      { sourceType: 'CONTRACT', total: 0, count: bySourceType.CONTRACT || 0 },
+      { sourceType: 'SERVICE_ORDER', total: 0, count: bySourceType.SERVICE_ORDER || 0 },
+      { sourceType: 'MANUAL', total: 0, count: bySourceType.MANUAL || 0 },
+    ];
+
+    for (const doc of storage.billingDocuments) {
+      const src = bySource.find((s) => s.sourceType === doc.sourceType);
+      if (src) {
+        src.total = BillingMath.round(src.total + doc.total);
+      }
+    }
+
+    return {
+      totalIssuedValue: issuedValue,
+      totalIssuedCount: issuedCount,
+      totalCanceledValue: canceledValue,
+      totalCanceledCount: canceledCount,
+      totalPendingValue: pendingValue,
+      totalPendingCount: pendingCount,
+      totalDraftCount: 0,
+      activeRecurringCount,
+      activeRecurringMonthlyValue: monthlyRecurringRevenue,
+      upcomingDueCount: 0,
+      upcomingDueValue: 0,
+      byCompetence: [],
+      bySource,
+      totalBilledCurrentMonth,
+      totalBilledPreviousMonth,
+      pendingCount,
+      pendingValue,
+      issuedCount,
+      issuedValue,
+      canceledCount,
+      canceledValue,
+      monthlyRecurringRevenue,
+      byStatus,
+      bySourceType,
+    };
+  }
+
+  // 10. Consulta de Faturamentos Recorrentes
+  getRecurringBillings(
+    schemaNamespace: string,
+    filters?: { status?: string; customerId?: string; search?: string }
+  ): RecurringBilling[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return [];
+
+    return storage.recurringBillings.filter((r) => {
+      if (filters?.status && r.status !== filters.status) return false;
+      if (filters?.customerId && r.customerId !== filters.customerId) return false;
+      if (filters?.search) {
+        const q = filters.search.toLowerCase();
+        const matchCust = r.customerName?.toLowerCase().includes(q) || false;
+        const matchDesc = r.description?.toLowerCase().includes(q) || false;
+        const matchContract = r.contractNumber?.toLowerCase().includes(q) || false;
+        if (!matchCust && !matchDesc && !matchContract) return false;
+      }
+      return true;
+    });
+  }
+
+  // 11. Obter Recorrência por ID
+  getRecurringBillingById(schemaNamespace: string, id: string): RecurringBilling | undefined {
+    const storage = this.getTenantStorage(schemaNamespace);
+    return storage?.recurringBillings.find((r) => r.id === id);
+  }
+
+  // 12. Criar Faturamento Recorrente
+  createRecurringBilling(
+    schemaNamespace: string,
+    data: {
+      customerId: string;
+      customerName?: string;
+      customerDocument?: string;
+      contractId?: string;
+      contractNumber?: string;
+      frequency: RecurringFrequency;
+      startDate: string;
+      endDate?: string;
+      nextBillingDate?: string;
+      dayOfMonth: number;
+      dueRule: DueRule;
+      dueDays: number;
+      amount?: number;
+      description: string;
+      notes?: string;
+      items?: RecurringBillingItem[];
+    },
+    userId: string,
+    userName: string
+  ): RecurringBilling {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Tenant [${schemaNamespace}] não encontrado.`);
+
+    const id = `rec-bill-${crypto.randomUUID().slice(0, 8)}`;
+    const nextBillingDate = data.nextBillingDate || data.startDate;
+
+    const items: RecurringBillingItem[] = (data.items && data.items.length > 0)
+      ? data.items
+      : [
+          {
+            description: data.description,
+            itemType: 'SERVICE',
+            quantity: 1,
+            unitPrice: data.amount || 0,
+            discount: 0,
+            surcharge: 0,
+            total: data.amount || 0,
+          },
+        ];
+
+    const totalFromItems = items.reduce(
+      (acc, it) => acc + (it.total || (it.quantity * it.unitPrice - (it.discount || 0) + (it.surcharge || 0))),
+      0
+    );
+    const amount = data.amount !== undefined ? BillingMath.round(data.amount) : BillingMath.round(totalFromItems);
+
+    const recurring: RecurringBilling = {
+      id,
+      instanceId: schemaNamespace,
+      customerId: data.customerId,
+      customerName: data.customerName || 'Cliente',
+      customerDocument: data.customerDocument,
+      contractId: data.contractId,
+      contractNumber: data.contractNumber,
+      status: 'ACTIVE',
+      frequency: data.frequency,
+      startDate: data.startDate,
+      endDate: data.endDate,
+      nextBillingDate,
+      dayOfMonth: data.dayOfMonth || 10,
+      dueRule: data.dueRule || 'FIXED_DAY',
+      dueDays: data.dueDays || 10,
+      amount,
+      description: data.description,
+      notes: data.notes,
+      items,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    storage.recurringBillings.unshift(recurring);
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'CREATE_RECURRING_BILLING',
+      'RECURRING_BILLING',
+      recurring.id,
+      { customerId: recurring.customerId, amount: recurring.amount, frequency: recurring.frequency },
+      userId
+    );
+
+    return recurring;
+  }
+
+  // 13. Atualizar Faturamento Recorrente
+  updateRecurringBilling(
+    schemaNamespace: string,
+    id: string,
+    data: Partial<RecurringBilling>,
+    userId: string,
+    userName: string
+  ): RecurringBilling {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Tenant [${schemaNamespace}] não encontrado.`);
+
+    const recurring = storage.recurringBillings.find((r) => r.id === id);
+    if (!recurring) throw new Error(`Recorrência [${id}] não encontrada.`);
+
+    if (data.frequency) recurring.frequency = data.frequency;
+    if (data.startDate) recurring.startDate = data.startDate;
+    if (data.endDate !== undefined) recurring.endDate = data.endDate;
+    if (data.nextBillingDate) recurring.nextBillingDate = data.nextBillingDate;
+    if (data.dayOfMonth !== undefined) recurring.dayOfMonth = data.dayOfMonth;
+    if (data.dueRule) recurring.dueRule = data.dueRule;
+    if (data.dueDays !== undefined) recurring.dueDays = data.dueDays;
+    if (data.amount !== undefined) recurring.amount = BillingMath.round(data.amount);
+    if (data.description) recurring.description = data.description;
+    if (data.notes !== undefined) recurring.notes = data.notes;
+    if (data.items) recurring.items = data.items;
+    if (data.customerName) recurring.customerName = data.customerName;
+    if (data.customerDocument) recurring.customerDocument = data.customerDocument;
+
+    recurring.updatedAt = new Date().toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'UPDATE_RECURRING_BILLING',
+      'RECURRING_BILLING',
+      recurring.id,
+      { amount: recurring.amount },
+      userId
+    );
+
+    return recurring;
+  }
+
+  // 14. Alterar Status de Recorrência (ACTIVE, PAUSED, CANCELED)
+  setRecurringBillingStatus(
+    schemaNamespace: string,
+    id: string,
+    status: RecurringStatus,
+    userId: string,
+    userName: string
+  ): RecurringBilling {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Tenant [${schemaNamespace}] não encontrado.`);
+
+    const recurring = storage.recurringBillings.find((r) => r.id === id);
+    if (!recurring) throw new Error(`Recorrência [${id}] não encontrada.`);
+
+    recurring.status = status;
+    recurring.updatedAt = new Date().toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'SET_RECURRING_STATUS',
+      'RECURRING_BILLING',
+      recurring.id,
+      { status },
+      userId
+    );
+
+    return recurring;
+  }
+
+  // 15. Geração Idempotente de Recorrência (PRD Seção 24 & 26)
+  generateRecurringBilling(
+    schemaNamespace: string,
+    recurringId: string,
+    targetDate?: string,
+    userId?: string,
+    userName?: string,
+    force?: boolean
+  ): { billing: BillingDocument; log: BillingGenerationLog } {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Tenant [${schemaNamespace}] não encontrado.`);
+
+    const recurring = storage.recurringBillings.find((r) => r.id === recurringId);
+    if (!recurring) throw new Error(`Recorrência [${recurringId}] não encontrada.`);
+
+    if (recurring.status !== 'ACTIVE' && !force) {
+      throw new Error(`Recorrência está ${recurring.status}. Apenas recorrências ATIVAS podem ser faturadas.`);
+    }
+
+    const execDate = targetDate || recurring.nextBillingDate || new Date().toISOString().split('T')[0];
+    const comp = CompetenceHelper.getCompetenceForDate(execDate);
+
+    // Bloqueio de Concorrência & Idempotência
+    return RecurringBillingConcurrencyManager.withLockSync(schemaNamespace, recurringId, comp.competenceLabel, () => {
+      // 1. Verificação de Idempotência (PRD Seção 24)
+      const existingSuccessLog = storage.billingGenerationLogs.find(
+        (l) =>
+          l.recurringBillingId === recurringId &&
+          l.competenceLabel === comp.competenceLabel &&
+          l.status === 'SUCCESS'
+      );
+
+      const existingDoc = storage.billingDocuments.find(
+        (b) =>
+          b.recurringBillingId === recurringId &&
+          b.competenceLabel === comp.competenceLabel &&
+          b.status !== 'CANCELED'
+      );
+
+      if ((existingSuccessLog || existingDoc) && !force) {
+        throw new Error(
+          `Idempotência: Faturamento da recorrência para a competência ${comp.competenceLabel} já foi gerado com sucesso (Documento: ${existingDoc?.number || existingSuccessLog?.billingNumber}).`
+        );
+      }
+
+      // 2. Cálculo da Data de Vencimento
+      const issueDate = new Date().toISOString().split('T')[0];
+      const dueDate = CompetenceHelper.calculateDueDate(
+        issueDate,
+        comp.competenceEnd,
+        recurring.dueRule,
+        recurring.dueDays,
+        recurring.dayOfMonth
+      );
+
+      // 3. Itens do faturamento
+      const billingItems = recurring.items.map((it) => ({
+        itemType: it.itemType || ('SERVICE' as BillingItemType),
+        productId: it.productId,
+        serviceId: it.serviceId,
+        description: it.description,
+        quantity: it.quantity,
+        unitPrice: it.unitPrice,
+        discount: it.discount,
+        surcharge: it.surcharge,
+      }));
+
+      // 4. Criação do Documento de Faturamento
+      const billing = this.createBillingDocument(
+        schemaNamespace,
+        {
+          customerId: recurring.customerId,
+          customerName: recurring.customerName,
+          customerDocument: recurring.customerDocument,
+          sourceType: 'CONTRACT',
+          sourceId: recurring.contractId,
+          sourceNumber: recurring.contractNumber,
+          recurringBillingId: recurring.id,
+          issueDate,
+          competenceDate: execDate,
+          dueDate,
+          description: `${recurring.description} - Competência ${comp.competenceLabel}`,
+          items: billingItems,
+          status: 'ISSUED',
+        },
+        userId || 'system',
+        userName || 'Processamento Automático'
+      );
+
+      // 5. Atualização da Recorrência
+      recurring.lastGeneratedCompetence = comp.competenceLabel;
+      recurring.lastGeneratedAt = new Date().toISOString();
+      recurring.lastGeneratedBillingId = billing.id;
+      recurring.lastGeneratedBillingNumber = billing.number;
+      recurring.lastError = undefined;
+
+      // Avança próxima data de faturamento
+      recurring.nextBillingDate = CompetenceHelper.advanceNextBillingDate(
+        execDate,
+        recurring.frequency,
+        recurring.customIntervalMonths || 1,
+        recurring.dayOfMonth
+      );
+      recurring.updatedAt = new Date().toISOString();
+
+      // 6. Registro do Log de Geração
+      const log: BillingGenerationLog = {
+        id: `log-gen-${crypto.randomUUID().slice(0, 8)}`,
+        instanceId: schemaNamespace,
+        recurringBillingId: recurring.id,
+        competenceStart: comp.competenceStart,
+        competenceEnd: comp.competenceEnd,
+        competenceLabel: comp.competenceLabel,
+        billingId: billing.id,
+        billingNumber: billing.number,
+        status: 'SUCCESS',
+        attemptCount: 1,
+        executedAt: new Date().toISOString(),
+        workerId: 'worker-engine',
+      };
+      storage.billingGenerationLogs.unshift(log);
+
+      return { billing, log };
+    });
+  }
+
+  // 16. Processar Recorrências Vencidas em Lote (Batch)
+  processDueRecurringBillings(
+    schemaNamespace: string,
+    userId?: string,
+    userName?: string
+  ): {
+    totalEvaluated: number;
+    generatedCount: number;
+    failedCount: number;
+    results: Array<{ recurringId: string; success: boolean; billingNumber?: string; error?: string }>;
+  } {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Tenant [${schemaNamespace}] não encontrado.`);
+
+    const todayStr = new Date().toISOString().split('T')[0];
+    const dueRecurrings = storage.recurringBillings.filter(
+      (r) => r.status === 'ACTIVE' && r.nextBillingDate <= todayStr
+    );
+
+    let generatedCount = 0;
+    let failedCount = 0;
+    const results: Array<{ recurringId: string; success: boolean; billingNumber?: string; error?: string }> = [];
+
+    for (const rec of dueRecurrings) {
+      try {
+        const { billing } = this.generateRecurringBilling(
+          schemaNamespace,
+          rec.id,
+          rec.nextBillingDate,
+          userId,
+          userName,
+          false
+        );
+        generatedCount++;
+        results.push({ recurringId: rec.id, success: true, billingNumber: billing.number });
+      } catch (err: any) {
+        failedCount++;
+        const errorMessage = err?.message || 'Erro desconhecido ao faturar recorrência.';
+        rec.lastError = {
+          code: 'GENERATION_ERROR',
+          message: errorMessage,
+          timestamp: new Date().toISOString(),
+        };
+        rec.updatedAt = new Date().toISOString();
+
+        const comp = CompetenceHelper.getCompetenceForDate(rec.nextBillingDate || todayStr);
+        storage.billingGenerationLogs.unshift({
+          id: `log-gen-${crypto.randomUUID().slice(0, 8)}`,
+          instanceId: schemaNamespace,
+          recurringBillingId: rec.id,
+          competenceStart: comp.competenceStart,
+          competenceEnd: comp.competenceEnd,
+          competenceLabel: comp.competenceLabel,
+          status: 'FAILED',
+          errorMessage,
+          attemptCount: 1,
+          executedAt: new Date().toISOString(),
+          workerId: 'worker-engine-batch',
+        });
+
+        results.push({ recurringId: rec.id, success: false, error: errorMessage });
+      }
+    }
+
+    return {
+      totalEvaluated: dueRecurrings.length,
+      generatedCount,
+      failedCount,
+      results,
+    };
+  }
+
+  // 17. Histórico de Logs de Faturamento Recorrente
+  getBillingGenerationLogs(schemaNamespace: string, recurringBillingId?: string): BillingGenerationLog[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return [];
+
+    if (recurringBillingId) {
+      return storage.billingGenerationLogs.filter((l) => l.recurringBillingId === recurringBillingId);
+    }
+    return storage.billingGenerationLogs;
+  }
+
+  listBillingGenerationLogs(schemaNamespace: string, recurringBillingId?: string): BillingGenerationLog[] {
+    return this.getBillingGenerationLogs(schemaNamespace, recurringBillingId);
+  }
+
+  listBillingDocuments(
+    schemaNamespace: string,
+    filters?: {
+      status?: string;
+      customerId?: string;
+      sourceType?: string;
+      competence?: string;
+      search?: string;
+    }
+  ): BillingDocument[] {
+    return this.getBillingDocuments(schemaNamespace, filters);
+  }
+
+  listRecurringBillings(schemaNamespace: string): RecurringBilling[] {
+    return this.getRecurringBillings(schemaNamespace);
+  }
+
+  // ============================================================================
+  // PRD 06 — GESTÃO DE ESTOQUE & ALMOXARIFADO (WMS BÁSICO)
+  // ============================================================================
+
+  // 1. Depósitos (Warehouses)
+  listWarehouses(schemaNamespace: string): Warehouse[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return [];
+    return storage.warehouses || [];
+  }
+
+  getWarehouseById(schemaNamespace: string, id: string): Warehouse | undefined {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return undefined;
+    return (storage.warehouses || []).find((w) => w.id === id);
+  }
+
+  createWarehouse(
+    schemaNamespace: string,
+    data: {
+      code?: string;
+      name: string;
+      description?: string;
+      location?: string;
+      isDefault?: boolean;
+    },
+    companyId: string
+  ): Warehouse {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não provisionado.`);
+
+    storage.sequentialCounters.warehouse = (storage.sequentialCounters.warehouse || 0) + 1;
+    const code = data.code?.trim().toUpperCase() || InventoryEngine.formatWarehouseCode(storage.sequentialCounters.warehouse);
+
+    // Se for marcado como padrão ou for o primeiro, atualiza flags
+    if (data.isDefault || storage.warehouses.length === 0) {
+      storage.warehouses.forEach((w) => {
+        w.isDefault = false;
+      });
+    }
+
+    const newWarehouse: Warehouse = {
+      id: `wh-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      companyId,
+      code,
+      name: data.name.trim(),
+      description: data.description?.trim(),
+      location: data.location?.trim(),
+      isDefault: !!data.isDefault || storage.warehouses.length === 0,
+      isActive: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    storage.warehouses.push(newWarehouse);
+    return newWarehouse;
+  }
+
+  updateWarehouse(
+    schemaNamespace: string,
+    id: string,
+    data: Partial<Warehouse>
+  ): Warehouse | null {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return null;
+
+    const warehouse = (storage.warehouses || []).find((w) => w.id === id);
+    if (!warehouse) return null;
+
+    if (data.isDefault) {
+      storage.warehouses.forEach((w) => {
+        if (w.id !== id) w.isDefault = false;
+      });
+    }
+
+    Object.assign(warehouse, {
+      ...data,
+      id: warehouse.id,
+      companyId: warehouse.companyId,
+      createdAt: warehouse.createdAt,
+      updatedAt: new Date().toISOString(),
+    });
+
+    return warehouse;
+  }
+
+  deleteWarehouse(schemaNamespace: string, id: string): boolean {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return false;
+
+    const index = (storage.warehouses || []).findIndex((w) => w.id === id);
+    if (index === -1) return false;
+
+    const warehouse = storage.warehouses[index];
+    if (warehouse.isDefault && storage.warehouses.length > 1) {
+      throw new Error('Não é permitido excluir o depósito principal/padrão da empresa.');
+    }
+
+    // Verifica se possui itens com saldo
+    const hasActiveStock = (storage.stockItems || []).some(
+      (item) => item.warehouseId === id && item.quantity > 0
+    );
+    if (hasActiveStock) {
+      throw new Error('Não é possível excluir um depósito com produtos em estoque. Zere ou transfira o saldo antes.');
+    }
+
+    storage.warehouses.splice(index, 1);
+    return true;
+  }
+
+  // 2. Saldos em Estoque (Stock Items)
+  listStockItems(
+    schemaNamespace: string,
+    filters?: {
+      warehouseId?: string;
+      search?: string;
+      lowStockOnly?: boolean;
+    }
+  ): StockItem[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return [];
+
+    let items = storage.stockItems || [];
+
+    if (filters?.warehouseId) {
+      items = items.filter((i) => i.warehouseId === filters.warehouseId);
+    }
+
+    if (filters?.search) {
+      const q = filters.search.toLowerCase().trim();
+      items = items.filter(
+        (i) =>
+          i.productCode.toLowerCase().includes(q) ||
+          i.productName.toLowerCase().includes(q) ||
+          i.warehouseName.toLowerCase().includes(q)
+      );
+    }
+
+    if (filters?.lowStockOnly) {
+      items = items.filter((i) => i.quantity <= i.minQuantity && i.minQuantity > 0);
+    }
+
+    return items;
+  }
+
+  getStockItem(
+    schemaNamespace: string,
+    warehouseId: string,
+    productId: string
+  ): StockItem | undefined {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return undefined;
+    return (storage.stockItems || []).find(
+      (i) => i.warehouseId === warehouseId && i.productId === productId
+    );
+  }
+
+  getStockItemById(schemaNamespace: string, id: string): StockItem | undefined {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return undefined;
+    return (storage.stockItems || []).find((i) => i.id === id);
+  }
+
+  updateStockItemLimits(
+    schemaNamespace: string,
+    stockItemId: string,
+    minQuantity: number,
+    maxQuantity: number,
+    locationRack?: string
+  ): StockItem | null {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return null;
+
+    const item = (storage.stockItems || []).find((i) => i.id === stockItemId);
+    if (!item) return null;
+
+    item.minQuantity = Math.max(0, minQuantity);
+    item.maxQuantity = Math.max(item.minQuantity, maxQuantity);
+    if (locationRack !== undefined) {
+      item.locationRack = locationRack.trim();
+    }
+    item.updatedAt = new Date().toISOString();
+
+    return item;
+  }
+
+  // 3. Movimentações de Estoque & Recálculo de CMP (Kardex)
+  recordStockMovement(
+    schemaNamespace: string,
+    input: {
+      movementType: StockMovementType;
+      productId: string;
+      warehouseId: string;
+      quantity: number;
+      unitCost?: number;
+      referenceType?: StockMovementReferenceType;
+      referenceId?: string;
+      referenceDocument?: string;
+      batchNumber?: string;
+      expirationDate?: string;
+      notes?: string;
+      locationRack?: string;
+    },
+    userContext: { id: string; name: string }
+  ): StockMovement {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não provisionado.`);
+
+    const product = (storage.products || []).find((p) => p.id === input.productId);
+    if (!product) throw new Error(`Produto [${input.productId}] não encontrado no catálogo.`);
+
+    const warehouse = (storage.warehouses || []).find((w) => w.id === input.warehouseId);
+    if (!warehouse) throw new Error(`Depósito [${input.warehouseId}] não encontrado.`);
+
+    const qty = Math.max(0, input.quantity);
+    if (qty <= 0) throw new Error('A quantidade da movimentação deve ser maior que zero.');
+
+    // Localiza ou inicializa o StockItem para o par (warehouse, product)
+    let stockItem = (storage.stockItems || []).find(
+      (i) => i.warehouseId === warehouse.id && i.productId === product.id
+    );
+
+    if (!stockItem) {
+      stockItem = {
+        id: `stk-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        companyId: warehouse.companyId,
+        warehouseId: warehouse.id,
+        warehouseName: warehouse.name,
+        productId: product.id,
+        productCode: product.code,
+        productName: product.name,
+        productUnit: product.unit,
+        quantity: 0,
+        reservedQuantity: 0,
+        availableQuantity: 0,
+        minQuantity: 0,
+        maxQuantity: 0,
+        averageCost: product.costPrice || 0,
+        lastCost: product.costPrice || 0,
+        totalValue: 0,
+        locationRack: input.locationRack || '',
+        updatedAt: new Date().toISOString(),
+      };
+      storage.stockItems.push(stockItem);
+    }
+
+    const previousStock = stockItem.quantity;
+    const previousAverageCost = stockItem.averageCost;
+    let newQuantity = previousStock;
+    let newAverageCost = previousAverageCost;
+    let unitCost = input.unitCost !== undefined && input.unitCost >= 0 ? input.unitCost : previousAverageCost;
+
+    const isInbound =
+      input.movementType === 'INBOUND_PURCHASE' ||
+      input.movementType === 'INBOUND_ADJUSTMENT' ||
+      input.movementType === 'TRANSFER_IN' ||
+      input.movementType === 'RETURN';
+
+    if (isInbound) {
+      // Recalcula CMP conforme a fórmula contábil
+      const cmpResult = InventoryMath.calculateCMP(
+        previousStock,
+        previousAverageCost,
+        qty,
+        unitCost
+      );
+      newQuantity = cmpResult.newQuantity;
+      newAverageCost = cmpResult.newAverageCost;
+      stockItem.lastCost = unitCost;
+    } else {
+      // Saída (Venda, OS, Perda, Ajuste Negativo, Transferência Saída)
+      if (stockItem.availableQuantity < qty && input.movementType !== 'OUTBOUND_ADJUSTMENT') {
+        throw new Error(
+          `Saldo insuficiente no depósito [${warehouse.name}]. Disponível: ${stockItem.availableQuantity} ${product.unit}. Solicitado: ${qty} ${product.unit}.`
+        );
+      }
+      newQuantity = InventoryMath.round(previousStock - qty, 4);
+      // Nas saídas o custo unitário aplicado é o CMP atual
+      unitCost = previousAverageCost;
+    }
+
+    stockItem.quantity = Math.max(0, newQuantity);
+    stockItem.availableQuantity = Math.max(0, stockItem.quantity - stockItem.reservedQuantity);
+    stockItem.averageCost = newAverageCost;
+    stockItem.totalValue = InventoryMath.round(stockItem.quantity * stockItem.averageCost, 2);
+    stockItem.updatedAt = new Date().toISOString();
+
+    storage.sequentialCounters.inventoryMovement = (storage.sequentialCounters.inventoryMovement || 0) + 1;
+    const movementNumber = InventoryEngine.formatMovementNumber(storage.sequentialCounters.inventoryMovement);
+
+    const movement: StockMovement = {
+      id: `mov-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      companyId: warehouse.companyId,
+      movementNumber,
+      movementType: input.movementType,
+      productId: product.id,
+      productCode: product.code,
+      productName: product.name,
+      productUnit: product.unit,
+      warehouseId: warehouse.id,
+      warehouseName: warehouse.name,
+      quantity: qty,
+      unitCost,
+      totalCost: InventoryMath.round(qty * unitCost, 2),
+      previousStock,
+      currentStock: stockItem.quantity,
+      previousAverageCost,
+      newAverageCost,
+      referenceType: input.referenceType || 'MANUAL',
+      referenceId: input.referenceId,
+      referenceDocument: input.referenceDocument,
+      batchNumber: input.batchNumber,
+      expirationDate: input.expirationDate,
+      notes: input.notes,
+      createdById: userContext.id,
+      createdByName: userContext.name,
+      createdAt: new Date().toISOString(),
+    };
+
+    storage.stockMovements.push(movement);
+    return movement;
+  }
+
+  // 4. Transferência entre Depósitos
+  transferStock(
+    schemaNamespace: string,
+    input: StockTransferInput,
+    userContext: { id: string; name: string }
+  ): { outboundMovement: StockMovement; inboundMovement: StockMovement } {
+    if (input.sourceWarehouseId === input.targetWarehouseId) {
+      throw new Error('O depósito de origem e destino não podem ser iguais.');
+    }
+
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não provisionado.`);
+
+    const sourceWh = (storage.warehouses || []).find((w) => w.id === input.sourceWarehouseId);
+    const targetWh = (storage.warehouses || []).find((w) => w.id === input.targetWarehouseId);
+    if (!sourceWh || !targetWh) throw new Error('Depósito de origem ou destino inválido.');
+
+    const sourceStock = this.getStockItem(schemaNamespace, input.sourceWarehouseId, input.productId);
+    if (!sourceStock || sourceStock.availableQuantity < input.quantity) {
+      throw new Error(
+        `Saldo insuficiente no depósito de origem [${sourceWh.name}]. Disponível: ${sourceStock?.availableQuantity || 0}. Solicitado: ${input.quantity}.`
+      );
+    }
+
+    const transferCost = sourceStock.averageCost;
+
+    // Saída da Origem
+    const outbound = this.recordStockMovement(
+      schemaNamespace,
+      {
+        movementType: 'TRANSFER_OUT',
+        productId: input.productId,
+        warehouseId: input.sourceWarehouseId,
+        quantity: input.quantity,
+        unitCost: transferCost,
+        referenceType: 'TRANSFER',
+        notes: `Transferência para [${targetWh.name}]. ${input.notes || ''}`.trim(),
+      },
+      userContext
+    );
+    outbound.targetWarehouseId = targetWh.id;
+    outbound.targetWarehouseName = targetWh.name;
+
+    // Entrada no Destino
+    const inbound = this.recordStockMovement(
+      schemaNamespace,
+      {
+        movementType: 'TRANSFER_IN',
+        productId: input.productId,
+        warehouseId: input.targetWarehouseId,
+        quantity: input.quantity,
+        unitCost: transferCost,
+        referenceType: 'TRANSFER',
+        referenceId: outbound.id,
+        referenceDocument: outbound.movementNumber,
+        notes: `Transferência recebida de [${sourceWh.name}]. ${input.notes || ''}`.trim(),
+      },
+      userContext
+    );
+    inbound.targetWarehouseId = sourceWh.id;
+    inbound.targetWarehouseName = sourceWh.name;
+
+    return { outboundMovement: outbound, inboundMovement: inbound };
+  }
+
+  // 5. Histórico de Movimentações (Kardex)
+  listStockMovements(
+    schemaNamespace: string,
+    filters?: {
+      warehouseId?: string;
+      productId?: string;
+      movementType?: string;
+      search?: string;
+      limit?: number;
+    }
+  ): StockMovement[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return [];
+
+    let list = [...(storage.stockMovements || [])].reverse();
+
+    if (filters?.warehouseId) {
+      list = list.filter((m) => m.warehouseId === filters.warehouseId || m.targetWarehouseId === filters.warehouseId);
+    }
+    if (filters?.productId) {
+      list = list.filter((m) => m.productId === filters.productId);
+    }
+    if (filters?.movementType) {
+      list = list.filter((m) => m.movementType === filters.movementType);
+    }
+    if (filters?.search) {
+      const q = filters.search.toLowerCase().trim();
+      list = list.filter(
+        (m) =>
+          m.movementNumber.toLowerCase().includes(q) ||
+          m.productCode.toLowerCase().includes(q) ||
+          m.productName.toLowerCase().includes(q) ||
+          (m.referenceDocument && m.referenceDocument.toLowerCase().includes(q))
+      );
+    }
+
+    if (filters?.limit && filters.limit > 0) {
+      list = list.slice(0, filters.limit);
+    }
+
+    return list;
+  }
+
+  // 6. Métricas Consolidadas de Estoque
+  getInventoryMetrics(schemaNamespace: string): InventoryMetrics {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) {
+      return {
+        totalItems: 0,
+        totalStockUnits: 0,
+        totalInventoryValue: 0,
+        lowStockCount: 0,
+        outOfStockCount: 0,
+        movementsCountThisMonth: 0,
+        activeWarehousesCount: 0,
+      };
+    }
+
+    const items = storage.stockItems || [];
+    const warehouses = (storage.warehouses || []).filter((w) => w.isActive);
+    const movements = storage.stockMovements || [];
+
+    const now = new Date();
+    const currentYearMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+    const totalStockUnits = items.reduce((acc, i) => acc + i.quantity, 0);
+    const totalInventoryValue = items.reduce((acc, i) => acc + (i.quantity * i.averageCost), 0);
+    const lowStockCount = items.filter((i) => i.quantity <= i.minQuantity && i.minQuantity > 0).length;
+    const outOfStockCount = items.filter((i) => i.quantity === 0).length;
+    const movementsCountThisMonth = movements.filter((m) => m.createdAt.startsWith(currentYearMonth)).length;
+
+    return {
+      totalItems: items.length,
+      totalStockUnits: InventoryMath.round(totalStockUnits, 2),
+      totalInventoryValue: InventoryMath.round(totalInventoryValue, 2),
+      lowStockCount,
+      outOfStockCount,
+      movementsCountThisMonth,
+      activeWarehousesCount: warehouses.length,
+    };
+  }
+
+  // ============================================================================
+  // PRD 07 — MÓDULO FISCAL & TRIBUTÁRIO BRASILEIRO (DF-e, NF-e, NFS-e, SPED)
+  // ============================================================================
+
+  // 1. Métricas Consolidadas do Módulo Fiscal
+  getFiscalMetrics(schemaNamespace: string): FiscalMetrics {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) {
+      return {
+        totalAuthorizedValue: 0,
+        totalAuthorizedCount: 0,
+        countNFe: 0,
+        countNFSe: 0,
+        countNFCe: 0,
+        totalICMSPeriod: 0,
+        totalISSPeriod: 0,
+        totalPISCOFINSPeriod: 0,
+        pendingDraftCount: 0,
+        canceledCount: 0,
+      };
+    }
+
+    const docs = storage.fiscalDocuments || [];
+    const authorized = docs.filter((d) => d.status === 'AUTHORIZED');
+    const drafts = docs.filter((d) => d.status === 'DRAFT');
+    const canceled = docs.filter((d) => d.status === 'CANCELED');
+
+    const totalAuthorizedValue = authorized.reduce((acc, d) => acc + d.netTotal, 0);
+    const countNFe = authorized.filter((d) => d.model === 'NFE_55').length;
+    const countNFSe = authorized.filter((d) => d.model === 'NFSE').length;
+    const countNFCe = authorized.filter((d) => d.model === 'NFCE_65').length;
+
+    const totalICMSPeriod = authorized.reduce((acc, d) => acc + d.totalICMS, 0);
+    const totalISSPeriod = authorized.reduce((acc, d) => acc + d.totalISS, 0);
+    const totalPISCOFINSPeriod = authorized.reduce((acc, d) => acc + (d.totalPIS + d.totalCOFINS), 0);
+
+    return {
+      totalAuthorizedValue: FiscalMath.round(totalAuthorizedValue, 2),
+      totalAuthorizedCount: authorized.length,
+      countNFe,
+      countNFSe,
+      countNFCe,
+      totalICMSPeriod: FiscalMath.round(totalICMSPeriod, 2),
+      totalISSPeriod: FiscalMath.round(totalISSPeriod, 2),
+      totalPISCOFINSPeriod: FiscalMath.round(totalPISCOFINSPeriod, 2),
+      pendingDraftCount: drafts.length,
+      canceledCount: canceled.length,
+    };
+  }
+
+  // 2. Listagem de Documentos Fiscais com Filtros Avançados
+  listFiscalDocuments(
+    schemaNamespace: string,
+    filters?: {
+      model?: FiscalDocumentModel;
+      status?: FiscalDocumentStatus;
+      type?: FiscalDocumentType;
+      search?: string;
+      startDate?: string;
+      endDate?: string;
+      limit?: number;
+    }
+  ): FiscalDocument[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return [];
+
+    let list = [...(storage.fiscalDocuments || [])];
+
+    // Ordenação decrescente por data/emissão
+    list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    if (filters?.model) {
+      list = list.filter((d) => d.model === filters.model);
+    }
+    if (filters?.status) {
+      list = list.filter((d) => d.status === filters.status);
+    }
+    if (filters?.type) {
+      list = list.filter((d) => d.type === filters.type);
+    }
+    if (filters?.startDate) {
+      list = list.filter((d) => d.issueDate >= filters.startDate!);
+    }
+    if (filters?.endDate) {
+      list = list.filter((d) => d.issueDate <= filters.endDate!);
+    }
+    if (filters?.search && filters.search.trim() !== '') {
+      const q = filters.search.trim().toLowerCase();
+      list = list.filter(
+        (d) =>
+          d.accessKey.toLowerCase().includes(q) ||
+          String(d.number).includes(q) ||
+          d.partnerName.toLowerCase().includes(q) ||
+          d.partnerCnpjCpf.includes(q) ||
+          (d.protocolNumber && d.protocolNumber.toLowerCase().includes(q))
+      );
+    }
+
+    if (filters?.limit && filters.limit > 0) {
+      list = list.slice(0, filters.limit);
+    }
+
+    return list;
+  }
+
+  // 3. Obter Documento Fiscal por ID
+  getFiscalDocumentById(schemaNamespace: string, id: string): FiscalDocument | undefined {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return undefined;
+    return (storage.fiscalDocuments || []).find((d) => d.id === id);
+  }
+
+  // 4. Criar Documento Fiscal Eletrônico
+  createFiscalDocument(
+    schemaNamespace: string,
+    input: {
+      model: FiscalDocumentModel;
+      series?: string;
+      type: FiscalDocumentType;
+      natureOfOperation: string;
+      cfopPrincipal: string;
+      partnerId?: string;
+      partnerName: string;
+      partnerCnpjCpf: string;
+      partnerStateRegistration?: string;
+      partnerEmail?: string;
+      partnerAddress: {
+        street: string;
+        number: string;
+        complement?: string;
+        neighborhood: string;
+        city: string;
+        state: string;
+        zipCode: string;
+        ibgeCode?: string;
+      };
+      items: Array<{
+        productId?: string;
+        productCode: string;
+        productName: string;
+        ncm: string;
+        cest?: string;
+        cfop: string;
+        unit: string;
+        quantity: number;
+        unitPrice: number;
+        discount?: number;
+        isService?: boolean;
+        serviceCode?: string;
+        icmsRate?: number;
+        icmsCst?: string;
+        ipiRate?: number;
+        pisRate?: number;
+        cofinsRate?: number;
+        issRate?: number;
+        issWithheld?: boolean;
+      }>;
+      additionalInfo?: string;
+      billingDocumentId?: string;
+      saleId?: string;
+      transmitImmediately?: boolean;
+    },
+    userId: string,
+    userName: string
+  ): FiscalDocument {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error('Schema do tenant não encontrado');
+
+    const company = this.getCompanyBySchemaNamespace(schemaNamespace);
+    const companyRegime: TaxRegime = company?.segment === 'servicos' ? 'SIMPLES_NACIONAL' : 'LUCRO_PRESUMIDO';
+
+    // Incrementar contador sequencial
+    const series = input.series || '1';
+    let docNumber = 1;
+    if (input.model === 'NFE_55') {
+      storage.sequentialCounters.fiscalNFe = (storage.sequentialCounters.fiscalNFe || 1000) + 1;
+      docNumber = storage.sequentialCounters.fiscalNFe;
+    } else if (input.model === 'NFSE') {
+      storage.sequentialCounters.fiscalNFSe = (storage.sequentialCounters.fiscalNFSe || 500) + 1;
+      docNumber = storage.sequentialCounters.fiscalNFSe;
+    } else {
+      storage.sequentialCounters.fiscalNFCe = (storage.sequentialCounters.fiscalNFCe || 2000) + 1;
+      docNumber = storage.sequentialCounters.fiscalNFCe;
+    }
+
+    const now = new Date();
+    const issueDate = now.toISOString().split('T')[0];
+    const issueTime = now.toTimeString().split(' ')[0];
+
+    // Processar itens e cálculos tributários
+    const processedItems: FiscalItem[] = input.items.map((item, index) => {
+      const taxes = FiscalMath.calculateItemTaxes(item, companyRegime);
+      return {
+        id: `fitem-${Date.now()}-${index + 1}`,
+        itemSequence: index + 1,
+        productId: item.productId,
+        productCode: item.productCode || `ITM-${index + 1}`,
+        productName: item.productName,
+        ncm: item.ncm || '8471.30.12',
+        cest: item.cest,
+        cfop: item.cfop || input.cfopPrincipal,
+        unit: item.unit || (item.isService ? 'SV' : 'UN'),
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        totalPrice: taxes.totalPrice,
+        discount: taxes.discount,
+        netTotal: taxes.netTotal,
+        icmsCst: taxes.icmsCst,
+        icmsBase: taxes.icmsBase,
+        icmsRate: taxes.icmsRate,
+        icmsValue: taxes.icmsValue,
+        ipiCst: item.ipiRate ? '50' : '99',
+        ipiBase: taxes.ipiBase,
+        ipiRate: taxes.ipiRate,
+        ipiValue: taxes.ipiValue,
+        pisCst: taxes.pisRate > 0 ? '01' : '07',
+        pisBase: taxes.pisBase,
+        pisRate: taxes.pisRate,
+        pisValue: taxes.pisValue,
+        cofinsCst: taxes.cofinsRate > 0 ? '01' : '07',
+        cofinsBase: taxes.cofinsBase,
+        cofinsRate: taxes.cofinsRate,
+        cofinsValue: taxes.cofinsValue,
+        serviceCode: item.serviceCode || (item.isService ? '01.07' : undefined),
+        issBase: taxes.issBase,
+        issRate: taxes.issRate,
+        issValue: taxes.issValue,
+        issWithheld: !!item.issWithheld,
+        approximateTaxes: taxes.approximateTaxes,
+      };
+    });
+
+    const isServiceDoc = input.model === 'NFSE';
+    const totalProducts = isServiceDoc ? 0 : processedItems.reduce((acc, i) => acc + i.totalPrice, 0);
+    const totalServices = isServiceDoc ? processedItems.reduce((acc, i) => acc + i.totalPrice, 0) : 0;
+    const totalDiscounts = processedItems.reduce((acc, i) => acc + i.discount, 0);
+    const totalICMS = processedItems.reduce((acc, i) => acc + i.icmsValue, 0);
+    const totalIPI = processedItems.reduce((acc, i) => acc + i.ipiValue, 0);
+    const totalPIS = processedItems.reduce((acc, i) => acc + i.pisValue, 0);
+    const totalCOFINS = processedItems.reduce((acc, i) => acc + i.cofinsValue, 0);
+    const totalISS = processedItems.reduce((acc, i) => acc + i.issValue, 0);
+    const totalApproximateTaxes = processedItems.reduce((acc, i) => acc + i.approximateTaxes, 0);
+    const netTotal = processedItems.reduce((acc, i) => acc + i.netTotal, 0);
+    const totalTaxableAmount = isServiceDoc ? 0 : netTotal;
+
+    // Gerar Chave de Acesso Oficial (44 dígitos para NF-e/NFC-e ou Código RPS para NFS-e)
+    let accessKey = '';
+    if (input.model === 'NFSE') {
+      accessKey = `RPS-${series}-${docNumber}-${Math.floor(100000 + Math.random() * 900000)}`;
+    } else {
+      accessKey = FiscalMath.generateAccessKey({
+        issueDate,
+        cnpj: company?.cleanCnpj || '12345678000195',
+        model: input.model,
+        series,
+        number: docNumber,
+      });
+    }
+
+    const docId = `fisc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const status: FiscalDocumentStatus = input.transmitImmediately ? 'AUTHORIZED' : 'DRAFT';
+    const protocolNumber = input.transmitImmediately
+      ? FiscalMath.generateProtocol(input.model, issueDate)
+      : undefined;
+    const authorizedAt = input.transmitImmediately ? now.toISOString() : undefined;
+
+    const newDoc: FiscalDocument = {
+      id: docId,
+      companyId: company?.id || 'cmp-default',
+      model: input.model,
+      series,
+      number: docNumber,
+      accessKey,
+      issueDate,
+      issueTime,
+      type: input.type,
+      status,
+      natureOfOperation: input.natureOfOperation,
+      cfopPrincipal: input.cfopPrincipal,
+      partnerId: input.partnerId,
+      partnerName: input.partnerName,
+      partnerCnpjCpf: input.partnerCnpjCpf,
+      partnerStateRegistration: input.partnerStateRegistration,
+      partnerEmail: input.partnerEmail,
+      partnerAddress: input.partnerAddress,
+      items: processedItems,
+      totalProducts: FiscalMath.round(totalProducts, 2),
+      totalServices: FiscalMath.round(totalServices, 2),
+      totalDiscounts: FiscalMath.round(totalDiscounts, 2),
+      totalFreight: 0,
+      totalInsurance: 0,
+      totalOtherExpenses: 0,
+      totalTaxableAmount: FiscalMath.round(totalTaxableAmount, 2),
+      totalICMS: FiscalMath.round(totalICMS, 2),
+      totalIPI: FiscalMath.round(totalIPI, 2),
+      totalPIS: FiscalMath.round(totalPIS, 2),
+      totalCOFINS: FiscalMath.round(totalCOFINS, 2),
+      totalISS: FiscalMath.round(totalISS, 2),
+      totalWithheldTaxes: 0,
+      totalApproximateTaxes: FiscalMath.round(totalApproximateTaxes, 2),
+      netTotal: FiscalMath.round(netTotal, 2),
+      protocolNumber,
+      authorizedAt,
+      correctionLetters: [],
+      billingDocumentId: input.billingDocumentId,
+      saleId: input.saleId,
+      additionalInfo: input.additionalInfo,
+      createdById: userId,
+      createdByName: userName,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+    };
+
+    // Gerar XML inicial
+    newDoc.xmlPayload = FiscalXmlGenerator.generateNFeXml(newDoc, {
+      legalName: company?.legalName || 'Alfa Serviços Empresariais Ltda',
+      tradeName: company?.tradeName,
+      cnpj: company?.cnpj || '12.345.678/0001-95',
+      stateRegistration: '123.456.789.110',
+    });
+
+    storage.fiscalDocuments.unshift(newDoc);
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'CREATE',
+      'FISCAL_DOCUMENT',
+      docId,
+      {
+        model: newDoc.model,
+        number: newDoc.number,
+        accessKey: newDoc.accessKey,
+        status: newDoc.status,
+        netTotal: newDoc.netTotal,
+      },
+      userId
+    );
+
+    return newDoc;
+  }
+
+  // 5. Transmitir Documento Fiscal para a SEFAZ / Prefeitura
+  transmitFiscalDocument(
+    schemaNamespace: string,
+    id: string,
+    userId: string,
+    userName: string
+  ): FiscalDocument {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error('Schema do tenant não encontrado');
+
+    const doc = (storage.fiscalDocuments || []).find((d) => d.id === id);
+    if (!doc) throw new Error('Documento fiscal não encontrado');
+
+    if (doc.status === 'AUTHORIZED') {
+      throw new Error('Este documento já foi autorizado pela SEFAZ/Prefeitura.');
+    }
+    if (doc.status === 'CANCELED') {
+      throw new Error('Não é possível transmitir um documento cancelado.');
+    }
+
+    const company = this.getCompanyBySchemaNamespace(schemaNamespace);
+    const now = new Date();
+    doc.status = 'AUTHORIZED';
+    doc.authorizedAt = now.toISOString();
+    doc.protocolNumber = FiscalMath.generateProtocol(doc.model, doc.issueDate);
+    doc.updatedAt = now.toISOString();
+
+    // Atualizar XML com o protocolo de autorização oficial
+    doc.xmlPayload = FiscalXmlGenerator.generateNFeXml(doc, {
+      legalName: company?.legalName || 'Alfa Serviços Empresariais Ltda',
+      tradeName: company?.tradeName,
+      cnpj: company?.cnpj || '12.345.678/0001-95',
+      stateRegistration: '123.456.789.110',
+    });
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'TRANSMIT',
+      'FISCAL_DOCUMENT',
+      doc.id,
+      {
+        protocol: doc.protocolNumber,
+        authorizedAt: doc.authorizedAt,
+      },
+      userId
+    );
+
+    return doc;
+  }
+
+  // 6. Cancelar Documento Fiscal Autorizado (SEFAZ - Prazo legal e Justificativa)
+  cancelFiscalDocument(
+    schemaNamespace: string,
+    id: string,
+    justification: string,
+    userId: string,
+    userName: string
+  ): FiscalDocument {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error('Schema do tenant não encontrado');
+
+    const doc = (storage.fiscalDocuments || []).find((d) => d.id === id);
+    if (!doc) throw new Error('Documento fiscal não encontrado');
+
+    if (doc.status !== 'AUTHORIZED') {
+      throw new Error('Apenas documentos autorizados podem ser cancelados junto à SEFAZ.');
+    }
+
+    if (!justification || justification.trim().length < 15) {
+      throw new Error('A justificativa de cancelamento da SEFAZ exige no mínimo 15 caracteres.');
+    }
+
+    const now = new Date();
+    doc.status = 'CANCELED';
+    doc.cancellationReason = justification.trim();
+    doc.canceledAt = now.toISOString();
+    doc.updatedAt = now.toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'CANCEL',
+      'FISCAL_DOCUMENT',
+      doc.id,
+      {
+        reason: doc.cancellationReason,
+        canceledAt: doc.canceledAt,
+      },
+      userId
+    );
+
+    return doc;
+  }
+
+  // 7. Emitir Carta de Correção Eletrônica (CC-e)
+  addCorrectionLetter(
+    schemaNamespace: string,
+    id: string,
+    correctionText: string,
+    userId: string,
+    userName: string
+  ): FiscalDocument {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error('Schema do tenant não encontrado');
+
+    const doc = (storage.fiscalDocuments || []).find((d) => d.id === id);
+    if (!doc) throw new Error('Documento fiscal não encontrado');
+
+    if (doc.status !== 'AUTHORIZED') {
+      throw new Error('Cartas de Correção só podem ser emitidas para notas já autorizadas.');
+    }
+
+    if (!correctionText || correctionText.trim().length < 15) {
+      throw new Error('O texto da Carta de Correção exige no mínimo 15 caracteres explicativos.');
+    }
+
+    const seq = (doc.correctionLetters || []).length + 1;
+    const now = new Date();
+    const cceProtocol = `CCE-SEFAZ-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}-${Math.floor(10000000 + Math.random() * 90000000)}`;
+
+    const cce: FiscalCorrectionLetter = {
+      id: `cce-${Date.now()}-${seq}`,
+      sequenceNumber: seq,
+      correctionText: correctionText.trim(),
+      protocolNumber: cceProtocol,
+      issuedAt: now.toISOString(),
+      issuedByName: userName,
+    };
+
+    if (!doc.correctionLetters) doc.correctionLetters = [];
+    doc.correctionLetters.push(cce);
+    doc.updatedAt = now.toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'CORRECT',
+      'FISCAL_DOCUMENT',
+      doc.id,
+      {
+        sequenceNumber: seq,
+        protocol: cceProtocol,
+        correctionText: cce.correctionText,
+      },
+      userId
+    );
+
+    return doc;
+  }
+
+  // 8. Listar e Criar Operações Fiscais (CFOPs)
+  listFiscalOperations(schemaNamespace: string): FiscalOperation[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return [];
+    if (!storage.fiscalOperations || storage.fiscalOperations.length === 0) {
+      storage.fiscalOperations = [
+        {
+          id: 'fop-01',
+          cfop: '5.102',
+          description: 'Venda de mercadoria adquirida ou recebida de terceiros (Operação interna)',
+          type: 'OUTBOUND',
+          applicableRegime: 'ALL',
+          icmsCst: '102',
+          icmsRate: 18.0,
+          pisCst: '07',
+          pisRate: 0.65,
+          cofinsCst: '07',
+          cofinsRate: 3.0,
+          issRate: 0,
+          isDefault: true,
+        },
+        {
+          id: 'fop-02',
+          cfop: '6.102',
+          description: 'Venda de mercadoria adquirida de terceiros para outro Estado (Interestadual)',
+          type: 'OUTBOUND',
+          applicableRegime: 'ALL',
+          icmsCst: '102',
+          icmsRate: 12.0,
+          pisCst: '07',
+          pisRate: 0.65,
+          cofinsCst: '07',
+          cofinsRate: 3.0,
+          issRate: 0,
+        },
+        {
+          id: 'fop-03',
+          cfop: '5.933',
+          description: 'Prestação de serviço tributado pelo ISSQN (Municipal)',
+          type: 'OUTBOUND',
+          applicableRegime: 'ALL',
+          icmsCst: '00',
+          icmsRate: 0,
+          pisCst: '01',
+          pisRate: 0.65,
+          cofinsCst: '01',
+          cofinsRate: 3.0,
+          issRate: 5.0,
+          isDefault: true,
+        },
+        {
+          id: 'fop-04',
+          cfop: '1.102',
+          description: 'Compra para comercialização (Entrada interna)',
+          type: 'INBOUND',
+          applicableRegime: 'ALL',
+          icmsCst: '102',
+          icmsRate: 18.0,
+          pisCst: '50',
+          pisRate: 0.65,
+          cofinsCst: '50',
+          cofinsRate: 3.0,
+          issRate: 0,
+        },
+        {
+          id: 'fop-05',
+          cfop: '5.405',
+          description: 'Venda de mercadoria com Substituição Tributária (ICMS-ST retido anteriormente)',
+          type: 'OUTBOUND',
+          applicableRegime: 'ALL',
+          icmsCst: '500',
+          icmsRate: 0,
+          pisCst: '07',
+          pisRate: 0.65,
+          cofinsCst: '07',
+          cofinsRate: 3.0,
+          issRate: 0,
+        },
+      ];
+    }
+    return storage.fiscalOperations;
+  }
+
+  createFiscalOperation(
+    schemaNamespace: string,
+    input: Omit<FiscalOperation, 'id'>
+  ): FiscalOperation {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error('Schema do tenant não encontrado');
+
+    const newOp: FiscalOperation = {
+      id: `fop-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      ...input,
+    };
+
+    if (!storage.fiscalOperations) storage.fiscalOperations = [];
+    storage.fiscalOperations.push(newOp);
+    return newOp;
+  }
+
+  // 9. Inutilizações de Numeração Fiscal
+  listFiscalInutilizations(schemaNamespace: string): FiscalInutilization[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return [];
+    return storage.fiscalInutilizations || [];
+  }
+
+  createFiscalInutilization(
+    schemaNamespace: string,
+    input: {
+      model: FiscalDocumentModel;
+      series: string;
+      startNumber: number;
+      endNumber: number;
+      year: number;
+      justification: string;
+    },
+    userId: string,
+    userName: string
+  ): FiscalInutilization {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error('Schema do tenant não encontrado');
+
+    if (!input.justification || input.justification.trim().length < 15) {
+      throw new Error('A justificativa de inutilização exige no mínimo 15 caracteres.');
+    }
+
+    const now = new Date();
+    const protocolNumber = `INUT-SEFAZ-${input.year}-${Math.floor(100000000 + Math.random() * 900000000)}`;
+
+    const inut: FiscalInutilization = {
+      id: `inut-${Date.now()}`,
+      model: input.model,
+      series: input.series,
+      startNumber: input.startNumber,
+      endNumber: input.endNumber,
+      year: input.year,
+      justification: input.justification.trim(),
+      protocolNumber,
+      registeredAt: now.toISOString(),
+      registeredByName: userName,
+    };
+
+    if (!storage.fiscalInutilizations) storage.fiscalInutilizations = [];
+    storage.fiscalInutilizations.unshift(inut);
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'INUTILIZE',
+      'FISCAL_NUMBER',
+      inut.id,
+      {
+        model: inut.model,
+        range: `${inut.startNumber} a ${inut.endNumber}`,
+        protocol: inut.protocolNumber,
+      },
+      userId
+    );
+
+    return inut;
+  }
+
+  // 10. Geração e Prévia do SPED Fiscal (EFD ICMS/IPI)
+  generateSpedPreview(
+    schemaNamespace: string,
+    month: number,
+    year: number
+  ): { text: string; summary: SpedBlockSummary[] } {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error('Schema do tenant não encontrado');
+
+    const company = this.getCompanyBySchemaNamespace(schemaNamespace);
+    const docs = storage.fiscalDocuments || [];
+
+    return SpedFiscalEngine.generateSpedEfd(
+      month,
+      year,
+      {
+        legalName: company?.legalName || 'Alfa Serviços Empresariais Ltda',
+        cnpj: company?.cnpj || '12.345.678/0001-95',
+        stateRegistration: '123.456.789.110',
+        state: 'SP',
+      },
+      docs
+    );
+  }
+
+  // 11. Emissão de Documento Fiscal a partir do Módulo de Faturamento (PRD Parte 05)
+  createFiscalFromBilling(
+    schemaNamespace: string,
+    billingId: string,
+    model: FiscalDocumentModel,
+    userId: string,
+    userName: string
+  ): FiscalDocument {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error('Schema do tenant não encontrado');
+
+    const billing = (storage.billingDocuments || []).find((b) => b.id === billingId);
+    if (!billing) throw new Error('Documento de faturamento não encontrado');
+
+    // Buscar parceiro para obter dados cadastrais e endereço completo
+    const partner = (storage.partners || []).find((p) => p.id === billing.customerId);
+
+    const isService = model === 'NFSE';
+    const cfop = isService ? '5.933' : '5.102';
+    const nature = isService ? 'Prestação de Serviços em Tecnologia' : 'Venda de Mercadoria Faturada';
+
+    const items = (billing.items || []).map((item, idx) => ({
+      productId: item.productId,
+      productCode: item.productId || `FAT-ITM-${idx + 1}`,
+      productName: item.description,
+      ncm: isService ? '0000.00.00' : '8471.30.12',
+      cfop,
+      unit: isService ? 'SV' : 'UN',
+      quantity: item.quantity,
+      unitPrice: item.unitPrice,
+      discount: item.discount,
+      isService,
+      serviceCode: isService ? '01.07' : undefined,
+    }));
+
+    const doc = this.createFiscalDocument(
+      schemaNamespace,
+      {
+        model,
+        type: 'OUTBOUND',
+        natureOfOperation: nature,
+        cfopPrincipal: cfop,
+        partnerId: billing.customerId,
+        partnerName: billing.customerName,
+        partnerCnpjCpf: billing.customerDocument || '00.000.000/0001-00',
+        partnerAddress: {
+          street: partner?.address?.street || 'Avenida das Nações Unidas',
+          number: partner?.address?.number || '12901',
+          neighborhood: partner?.address?.neighborhood || 'Brooklin Novo',
+          city: partner?.address?.city || 'São Paulo',
+          state: partner?.address?.state || 'SP',
+          zipCode: partner?.address?.zipCode || '04578-000',
+        },
+        items,
+        billingDocumentId: billing.id,
+        additionalInfo: `Documento Fiscal gerado automaticamente a partir do Faturamento Nº ${billing.number}.`,
+        transmitImmediately: true,
+      },
+      userId,
+      userName
+    );
+
+    // Vincular id da nota no documento de faturamento
+    billing.fiscalDocumentId = doc.id;
+    billing.updatedAt = new Date().toISOString();
+
+    return doc;
+  }
+
+  // ============================================================================
+  // PRD 08 — MÓDULO DE COMPRAS, SUPRIMENTOS & ENTRADA DE MERCADORIAS (PROCUREMENT)
+  // ============================================================================
+
+  public listPurchaseRequisitions(
+    schemaNamespace: string,
+    filter?: { status?: string; department?: string; priority?: string }
+  ): PurchaseRequisition[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return [];
+    let list = [...(storage.purchaseRequisitions || [])];
+    if (filter?.status) {
+      list = list.filter((r) => r.status === filter.status);
+    }
+    if (filter?.department) {
+      list = list.filter((r) => r.department?.toLowerCase().includes(filter.department!.toLowerCase()));
+    }
+    if (filter?.priority) {
+      list = list.filter((r) => r.priority === filter.priority);
+    }
+    return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  public getPurchaseRequisitionById(schemaNamespace: string, id: string): PurchaseRequisition | undefined {
+    const storage = this.getTenantStorage(schemaNamespace);
+    return storage?.purchaseRequisitions?.find((r) => r.id === id);
+  }
+
+  public createPurchaseRequisition(
+    schemaNamespace: string,
+    data: Partial<PurchaseRequisition>,
+    user: { id: string; name: string }
+  ): PurchaseRequisition {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema namespace '${schemaNamespace}' não encontrado.`);
+
+    const counter = (storage.sequentialCounters.purchaseRequisition || 0) + 1;
+    storage.sequentialCounters.purchaseRequisition = counter;
+    const number = `RC-${String(counter).padStart(6, '0')}`;
+
+    const items: PurchaseRequisitionItem[] = (data.items || []).map((item, index) => {
+      const unitPrice = item.estimatedUnitPrice || 0;
+      const qty = item.quantity || 1;
+      return {
+        id: item.id || `rc-item-${Date.now().toString(36)}-${index}`,
+        productId: item.productId,
+        productCode: item.productCode || 'ITEM',
+        productName: item.productName || 'Item Solicitado',
+        quantity: qty,
+        unit: item.unit || 'UN',
+        estimatedUnitPrice: unitPrice,
+        estimatedTotalPrice: ProcurementMath.roundBRL(qty * unitPrice),
+        notes: item.notes,
+      };
+    });
+
+    const totalEstimated = items.reduce((acc, it) => acc + it.estimatedTotalPrice, 0);
+
+    const requisition: PurchaseRequisition = {
+      id: `rc-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
+      number,
+      requestedById: user.id,
+      requestedByName: user.name,
+      department: data.department || 'Geral',
+      priority: data.priority || 'MEDIA',
+      status: 'PENDENTE_APROVACAO',
+      justification: data.justification || 'Solicitação de suprimentos e materiais operacionais.',
+      neededByDate: data.neededByDate || new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
+      costCenterId: data.costCenterId,
+      costCenterName: data.costCenterName,
+      items,
+      totalEstimated: ProcurementMath.roundBRL(totalEstimated),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    storage.purchaseRequisitions.unshift(requisition);
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'CREATE',
+      'PURCHASE_REQUISITION',
+      requisition.id,
+      {
+        number: requisition.number,
+        totalEstimated: requisition.totalEstimated,
+        priority: requisition.priority,
+        itemsCount: items.length,
+      },
+      user.id
+    );
+
+    return requisition;
+  }
+
+  public approvePurchaseRequisition(
+    schemaNamespace: string,
+    id: string,
+    user: { id: string; name: string }
+  ): PurchaseRequisition {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema namespace '${schemaNamespace}' não encontrado.`);
+
+    const req = storage.purchaseRequisitions.find((r) => r.id === id);
+    if (!req) throw new Error(`Requisição de Compra ID ${id} não encontrada.`);
+    if (req.status !== 'PENDENTE_APROVACAO' && req.status !== 'RASCUNHO') {
+      throw new Error(`Apenas requisições pendentes ou em rascunho podem ser aprovadas. Status atual: ${req.status}`);
+    }
+
+    req.status = 'APROVADA';
+    req.approvedById = user.id;
+    req.approvedByName = user.name;
+    req.approvedAt = new Date().toISOString();
+    req.updatedAt = new Date().toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'APPROVE',
+      'PURCHASE_REQUISITION',
+      req.id,
+      { number: req.number, totalEstimated: req.totalEstimated },
+      user.id
+    );
+
+    return req;
+  }
+
+  public rejectPurchaseRequisition(
+    schemaNamespace: string,
+    id: string,
+    reason: string,
+    user: { id: string; name: string }
+  ): PurchaseRequisition {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema namespace '${schemaNamespace}' não encontrado.`);
+
+    const req = storage.purchaseRequisitions.find((r) => r.id === id);
+    if (!req) throw new Error(`Requisição de Compra ID ${id} não encontrada.`);
+
+    req.status = 'REJEITADA';
+    req.rejectionReason = reason;
+    req.rejectedAt = new Date().toISOString();
+    req.updatedAt = new Date().toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'REJECT',
+      'PURCHASE_REQUISITION',
+      req.id,
+      { number: req.number, reason },
+      user.id
+    );
+
+    return req;
+  }
+
+  public cancelPurchaseRequisition(
+    schemaNamespace: string,
+    id: string,
+    user: { id: string; name: string }
+  ): PurchaseRequisition {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema namespace '${schemaNamespace}' não encontrado.`);
+
+    const req = storage.purchaseRequisitions.find((r) => r.id === id);
+    if (!req) throw new Error(`Requisição de Compra ID ${id} não encontrada.`);
+
+    req.status = 'CANCELADA';
+    req.updatedAt = new Date().toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'CANCEL',
+      'PURCHASE_REQUISITION',
+      req.id,
+      { number: req.number },
+      user.id
+    );
+
+    return req;
+  }
+
+  // COTAÇÕES DE COMPRA (QUOTATIONS)
+  public listPurchaseQuotations(schemaNamespace: string, filter?: { status?: string }): PurchaseQuotation[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return [];
+    let list = [...(storage.purchaseQuotations || [])];
+    if (filter?.status) {
+      list = list.filter((q) => q.status === filter.status);
+    }
+    return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  public getPurchaseQuotationById(schemaNamespace: string, id: string): PurchaseQuotation | undefined {
+    const storage = this.getTenantStorage(schemaNamespace);
+    return storage?.purchaseQuotations?.find((q) => q.id === id);
+  }
+
+  public createPurchaseQuotation(
+    schemaNamespace: string,
+    data: Partial<PurchaseQuotation>,
+    user: { id: string; name: string }
+  ): PurchaseQuotation {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema namespace '${schemaNamespace}' não encontrado.`);
+
+    const counter = (storage.sequentialCounters.purchaseQuotation || 0) + 1;
+    storage.sequentialCounters.purchaseQuotation = counter;
+    const number = `COT-${String(counter).padStart(6, '0')}`;
+
+    // Se vinculada a requisições, atualiza status das requisições
+    const reqIds = data.requisitionIds || [];
+    if (reqIds.length > 0) {
+      for (const reqId of reqIds) {
+        const req = storage.purchaseRequisitions.find((r) => r.id === reqId);
+        if (req) {
+          req.status = 'EM_COTACAO';
+          req.updatedAt = new Date().toISOString();
+        }
+      }
+    }
+
+    const items = (data.items || []).map((it, idx) => ({
+      id: it.id || `cot-item-${Date.now().toString(36)}-${idx}`,
+      productId: it.productId,
+      productCode: it.productCode || 'ITEM',
+      productName: it.productName || 'Material / Item Cotação',
+      quantity: it.quantity || 1,
+      unit: it.unit || 'UN',
+      targetPrice: it.targetPrice,
+    }));
+
+    const quotation: PurchaseQuotation = {
+      id: `cot-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
+      number,
+      title: data.title || `Cotação de Materiais ${number}`,
+      requisitionIds: reqIds,
+      status: 'ABERTA',
+      deadlineDate: data.deadlineDate || new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
+      items,
+      proposals: [],
+      createdById: user.id,
+      createdByName: user.name,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    storage.purchaseQuotations.unshift(quotation);
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'CREATE',
+      'PURCHASE_QUOTATION',
+      quotation.id,
+      { number: quotation.number, itemsCount: items.length, deadlineDate: quotation.deadlineDate },
+      user.id
+    );
+
+    return quotation;
+  }
+
+  public addQuotationProposal(
+    schemaNamespace: string,
+    quotationId: string,
+    proposalData: Partial<SupplierQuotationProposal>
+  ): PurchaseQuotation {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema namespace '${schemaNamespace}' não encontrado.`);
+
+    const cot = storage.purchaseQuotations.find((q) => q.id === quotationId);
+    if (!cot) throw new Error(`Cotação ID ${quotationId} não encontrada.`);
+
+    const items: QuotationItemProposal[] = (proposalData.items || []).map((it) => {
+      const unitPrice = it.unitPrice || 0;
+      const qty = it.quantity || 1;
+      const discPerc = it.discountPercentage || 0;
+      const gross = ProcurementMath.roundBRL(qty * unitPrice);
+      const disc = ProcurementMath.roundBRL(gross * (discPerc / 100));
+      return {
+        itemId: it.itemId,
+        productName: it.productName || 'Item Proposta',
+        quantity: qty,
+        unit: it.unit || 'UN',
+        unitPrice,
+        discountPercentage: discPerc,
+        icmsPercentage: it.icmsPercentage || 18,
+        ipiPercentage: it.ipiPercentage || 0,
+        freightAmount: it.freightAmount || 0,
+        totalPrice: Math.max(0, gross - disc + (it.freightAmount || 0)),
+        deliveryDays: it.deliveryDays || 7,
+      };
+    });
+
+    const freight = proposalData.freightTotal || 0;
+    const totals = ProcurementMath.calculateProposalTotals(items, freight);
+
+    const proposal: SupplierQuotationProposal = {
+      id: proposalData.id || `prop-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
+      supplierId: proposalData.supplierId || 'ptn-unknown',
+      supplierName: proposalData.supplierName || 'Fornecedor Cotante',
+      supplierDocument: proposalData.supplierDocument || '00.000.000/0000-00',
+      supplierContact: proposalData.supplierContact,
+      deliveryDays: proposalData.deliveryDays || 7,
+      freightType: proposalData.freightType || 'CIF',
+      paymentTerm: proposalData.paymentTerm || '30 dias',
+      items,
+      subtotal: totals.subtotal,
+      discountTotal: totals.discountTotal,
+      freightTotal: totals.freightTotal,
+      grandTotal: totals.grandTotal,
+      notes: proposalData.notes,
+      submittedAt: new Date().toISOString(),
+      isOverallWinner: false,
+    };
+
+    // Remove proposta existente do mesmo fornecedor se houver atualização
+    cot.proposals = cot.proposals.filter((p) => p.supplierId !== proposal.supplierId);
+    cot.proposals.push(proposal);
+
+    // Se tiver mais de 1 proposta, atualiza status para EM_ANALISE
+    if (cot.proposals.length > 1 && cot.status === 'ABERTA') {
+      cot.status = 'EM_ANALISE';
+    }
+
+    const comp = QuotationComparator.compare(cot.proposals);
+    cot.savingsAmount = comp.savingsAmount;
+    cot.savingsPercentage = comp.savingsPercentage;
+
+    cot.updatedAt = new Date().toISOString();
+
+    return cot;
+  }
+
+  public homologateQuotation(
+    schemaNamespace: string,
+    quotationId: string,
+    winningSupplierId: string,
+    user: { id: string; name: string },
+    createPurchaseOrderFlag: boolean = true
+  ): { quotation: PurchaseQuotation; purchaseOrder?: PurchaseOrder } {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema namespace '${schemaNamespace}' não encontrado.`);
+
+    const cot = storage.purchaseQuotations.find((q) => q.id === quotationId);
+    if (!cot) throw new Error(`Cotação ID ${quotationId} não encontrada.`);
+
+    const winningProp = cot.proposals.find((p) => p.supplierId === winningSupplierId);
+    if (!winningProp) throw new Error(`Proposta do fornecedor '${winningSupplierId}' não encontrada nesta cotação.`);
+
+    // Marcar proposta vencedora
+    cot.proposals.forEach((p) => {
+      p.isOverallWinner = p.supplierId === winningSupplierId;
+      p.items.forEach((it) => {
+        it.isWinning = p.supplierId === winningSupplierId;
+      });
+    });
+
+    const comp = QuotationComparator.compare(cot.proposals);
+
+    cot.status = 'HOMOLOGADA';
+    cot.winningSupplierId = winningProp.supplierId;
+    cot.winningSupplierName = winningProp.supplierName;
+    cot.totalWinningAmount = winningProp.grandTotal;
+    cot.savingsAmount = comp.savingsAmount;
+    cot.savingsPercentage = comp.savingsPercentage;
+    cot.homologatedById = user.id;
+    cot.homologatedByName = user.name;
+    cot.homologatedAt = new Date().toISOString();
+    cot.updatedAt = new Date().toISOString();
+
+    let order: PurchaseOrder | undefined;
+
+    if (createPurchaseOrderFlag) {
+      // Criação automática do Pedido de Compra
+      const orderItems: PurchaseOrderItem[] = cot.items.map((it) => {
+        const propItem = winningProp.items.find((pi: QuotationItemProposal) => pi.itemId === it.id);
+        const unitPrice = propItem ? propItem.unitPrice : 0;
+        const gross = ProcurementMath.roundBRL(it.quantity * unitPrice);
+        return {
+          id: `pc-item-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
+          productId: it.productId,
+          productCode: it.productCode,
+          productName: it.productName,
+          quantity: it.quantity,
+          quantityReceived: 0,
+          unit: it.unit,
+          unitPrice,
+          discountAmount: 0,
+          aliquotIPI: propItem?.ipiPercentage || 0,
+          aliquotICMS: propItem?.icmsPercentage || 18,
+          totalAmount: gross,
+        };
+      });
+
+      order = this.createPurchaseOrder(
+        schemaNamespace,
+        {
+          quotationId: cot.id,
+          requisitionId: cot.requisitionIds[0],
+          supplierId: winningProp.supplierId,
+          supplierName: winningProp.supplierName,
+          supplierDocument: winningProp.supplierDocument,
+          paymentTerm: winningProp.paymentTerm,
+          paymentMethod: 'BOLETO',
+          freightTotal: winningProp.freightTotal,
+          items: orderItems,
+          notes: `Pedido originado automaticamente da homologação da Cotação ${cot.number}.`,
+        },
+        user
+      );
+    }
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'HOMOLOGATE',
+      'PURCHASE_QUOTATION',
+      cot.id,
+      {
+        number: cot.number,
+        winningSupplierName: winningProp.supplierName,
+        totalWinningAmount: winningProp.grandTotal,
+        savingsAmount: cot.savingsAmount,
+        purchaseOrderId: order?.id,
+      },
+      user.id
+    );
+
+    return { quotation: cot, purchaseOrder: order };
+  }
+
+  // PEDIDOS DE COMPRA (PURCHASE ORDERS)
+  public listPurchaseOrders(schemaNamespace: string, filter?: { status?: string; supplierId?: string }): PurchaseOrder[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return [];
+    let list = [...(storage.purchaseOrders || [])];
+    if (filter?.status) {
+      list = list.filter((p) => p.status === filter.status);
+    }
+    if (filter?.supplierId) {
+      list = list.filter((p) => p.supplierId === filter.supplierId);
+    }
+    return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  public getPurchaseOrderById(schemaNamespace: string, id: string): PurchaseOrder | undefined {
+    const storage = this.getTenantStorage(schemaNamespace);
+    return storage?.purchaseOrders?.find((p) => p.id === id);
+  }
+
+  public createPurchaseOrder(
+    schemaNamespace: string,
+    data: Partial<PurchaseOrder>,
+    user: { id: string; name: string }
+  ): PurchaseOrder {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema namespace '${schemaNamespace}' não encontrado.`);
+
+    const counter = (storage.sequentialCounters.purchaseOrder || 0) + 1;
+    storage.sequentialCounters.purchaseOrder = counter;
+    const number = `PC-${String(counter).padStart(6, '0')}`;
+
+    const items: PurchaseOrderItem[] = (data.items || []).map((it, idx) => {
+      const qty = it.quantity || 1;
+      const unitPrice = it.unitPrice || 0;
+      const gross = ProcurementMath.roundBRL(qty * unitPrice);
+      return {
+        id: it.id || `pc-item-${Date.now().toString(36)}-${idx}`,
+        productId: it.productId,
+        productCode: it.productCode || 'ITEM',
+        productName: it.productName || 'Produto / Mercadoria',
+        quantity: qty,
+        quantityReceived: 0,
+        unit: it.unit || 'UN',
+        unitPrice,
+        discountAmount: it.discountAmount || 0,
+        aliquotIPI: it.aliquotIPI || 0,
+        aliquotICMS: it.aliquotICMS || 18,
+        totalAmount: gross,
+      };
+    });
+
+    const freight = data.freightTotal || 0;
+    const totals = ProcurementMath.calculateOrderTotals(items, freight);
+
+    const partner = storage.partners.find((p) => p.id === data.supplierId);
+    const warehouse = storage.warehouses.find((w) => w.id === data.warehouseId) || storage.warehouses[0];
+
+    const order: PurchaseOrder = {
+      id: `pc-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
+      number,
+      quotationId: data.quotationId,
+      requisitionId: data.requisitionId,
+      supplierId: data.supplierId || partner?.id || 'ptn-default',
+      supplierName: data.supplierName || partner?.name || 'Fornecedor Cadastrado',
+      supplierDocument: data.supplierDocument || partner?.formattedDocument || '00.000.000/0000-00',
+      supplierContact: data.supplierContact || partner?.phone || partner?.email,
+      status: 'RASCUNHO',
+      paymentTerm: data.paymentTerm || '30 dias',
+      paymentMethod: data.paymentMethod || 'BOLETO',
+      expectedDeliveryDate: data.expectedDeliveryDate || new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
+      deliveryAddress: data.deliveryAddress || 'Almoxarifado Matriz',
+      warehouseId: warehouse?.id || 'wh-default',
+      warehouseName: warehouse?.name || 'Almoxarifado Principal',
+      costCenterId: data.costCenterId,
+      costCenterName: data.costCenterName,
+      subtotal: totals.subtotal,
+      discountTotal: totals.discountTotal,
+      freightTotal: totals.freightTotal,
+      taxesTotal: totals.taxesTotal,
+      grandTotal: totals.grandTotal,
+      items,
+      notes: data.notes,
+      createdById: user.id,
+      createdByName: user.name,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    storage.purchaseOrders.unshift(order);
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'CREATE',
+      'PURCHASE_ORDER',
+      order.id,
+      { number: order.number, supplierName: order.supplierName, grandTotal: order.grandTotal },
+      user.id
+    );
+
+    return order;
+  }
+
+  public approvePurchaseOrder(schemaNamespace: string, id: string, user: { id: string; name: string }): PurchaseOrder {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema namespace '${schemaNamespace}' não encontrado.`);
+
+    const order = storage.purchaseOrders.find((p) => p.id === id);
+    if (!order) throw new Error(`Pedido de Compra ID ${id} não encontrado.`);
+
+    order.status = 'APROVADO';
+    order.approvedById = user.id;
+    order.approvedByName = user.name;
+    order.approvedAt = new Date().toISOString();
+    order.updatedAt = new Date().toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'APPROVE',
+      'PURCHASE_ORDER',
+      order.id,
+      { number: order.number, grandTotal: order.grandTotal },
+      user.id
+    );
+
+    return order;
+  }
+
+  public rejectPurchaseOrder(
+    schemaNamespace: string,
+    id: string,
+    reason: string,
+    user: { id: string; name: string }
+  ): PurchaseOrder {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema namespace '${schemaNamespace}' não encontrado.`);
+
+    const order = storage.purchaseOrders.find((p) => p.id === id);
+    if (!order) throw new Error(`Pedido de Compra ID ${id} não encontrado.`);
+
+    order.status = 'REJEITADO';
+    order.rejectionReason = reason;
+    order.updatedAt = new Date().toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'REJECT',
+      'PURCHASE_ORDER',
+      order.id,
+      { number: order.number, reason },
+      user.id
+    );
+
+    return order;
+  }
+
+  public issuePurchaseOrder(schemaNamespace: string, id: string, user: { id: string; name: string }): PurchaseOrder {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema namespace '${schemaNamespace}' não encontrado.`);
+
+    const order = storage.purchaseOrders.find((p) => p.id === id);
+    if (!order) throw new Error(`Pedido de Compra ID ${id} não encontrado.`);
+
+    order.status = 'EMITIDO_AO_FORNECEDOR';
+    order.issuedAt = new Date().toISOString();
+    order.updatedAt = new Date().toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'ISSUE',
+      'PURCHASE_ORDER',
+      order.id,
+      { number: order.number, supplierName: order.supplierName },
+      user.id
+    );
+
+    return order;
+  }
+
+  public cancelPurchaseOrder(schemaNamespace: string, id: string, user: { id: string; name: string }): PurchaseOrder {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema namespace '${schemaNamespace}' não encontrado.`);
+
+    const order = storage.purchaseOrders.find((p) => p.id === id);
+    if (!order) throw new Error(`Pedido de Compra ID ${id} não encontrado.`);
+
+    order.status = 'CANCELADO';
+    order.updatedAt = new Date().toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'CANCEL',
+      'PURCHASE_ORDER',
+      order.id,
+      { number: order.number },
+      user.id
+    );
+
+    return order;
+  }
+
+  // ENTRADA DE NOTAS FISCAIS (INBOUND INVOICES / DF-e RECEBIMENTO)
+  public listInboundInvoices(schemaNamespace: string, filter?: { status?: string }): InboundInvoice[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return [];
+    let list = [...(storage.inboundInvoices || [])];
+    if (filter?.status) {
+      list = list.filter((i) => i.status === filter.status);
+    }
+    return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  public getInboundInvoiceById(schemaNamespace: string, id: string): InboundInvoice | undefined {
+    const storage = this.getTenantStorage(schemaNamespace);
+    return storage?.inboundInvoices?.find((i) => i.id === id);
+  }
+
+  public importInboundInvoiceXml(
+    schemaNamespace: string,
+    xmlContent: string,
+    warehouseId: string,
+    user: { id: string; name: string },
+    purchaseOrderId?: string
+  ): InboundInvoice {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema namespace '${schemaNamespace}' não encontrado.`);
+
+    const parsed = NFeXmlParser.parse(xmlContent);
+
+    // Verifica se a chave já foi importada no tenant
+    const existing = storage.inboundInvoices.find((i) => i.accessKey === parsed.accessKey);
+    if (existing) {
+      throw new Error(`Nota Fiscal com chave de acesso ${parsed.accessKey} já foi importada anteriormente (NF-e ${existing.number}).`);
+    }
+
+    const counter = (storage.sequentialCounters.inboundInvoice || 0) + 1;
+    storage.sequentialCounters.inboundInvoice = counter;
+
+    // Tentar localizar parceiro de negócio pelo CNPJ ou cadastrar automaticamente
+    const cleanCnpj = parsed.supplier.document.replace(/\D/g, '');
+    let partner = storage.partners.find((p) => p.document.replace(/\D/g, '') === cleanCnpj);
+    if (!partner) {
+      partner = {
+        id: `ptn-supp-${Date.now().toString(36)}`,
+        personType: cleanCnpj.length === 11 ? 'PF' : 'PJ',
+        document: cleanCnpj,
+        formattedDocument: formatDocument(cleanCnpj),
+        roles: ['FORNECEDOR'],
+        name: parsed.supplier.name,
+        tradeName: parsed.supplier.name.split(' ')[0],
+        stateRegistration: parsed.supplier.stateRegistration,
+        email: 'contato@fornecedor.com.br',
+        phone: '(11) 3000-0000',
+        address: {
+          zipCode: '01001-000',
+          street: 'Praça da Sé',
+          number: '100',
+          neighborhood: 'Centro',
+          city: 'São Paulo',
+          state: 'SP',
+          ibgeCode: '3550308',
+        },
+        creditLimit: 50000,
+        paymentTermsDays: 30,
+        status: 'ATIVO',
+        notes: 'Fornecedor cadastrado automaticamente via importação de XML de NF-e.',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      storage.partners.push(partner);
+    }
+
+    // Tenta associar itens ao catálogo interno
+    const mappedItems: InboundInvoiceItem[] = parsed.items.map((it) => {
+      const matchProduct = storage.products.find(
+        (p) => p.code.toLowerCase() === it.productCodeSupplier.toLowerCase() ||
+               p.name.toLowerCase().includes(it.productName.toLowerCase().substring(0, 10))
+      );
+
+      return {
+        ...it,
+        internalProductId: matchProduct?.id,
+        internalProductCode: matchProduct?.code,
+        internalProductName: matchProduct?.name,
+      };
+    });
+
+    let po: PurchaseOrder | undefined;
+    if (purchaseOrderId) {
+      po = storage.purchaseOrders.find((p) => p.id === purchaseOrderId);
+    }
+
+    const wh = storage.warehouses.find((w) => w.id === warehouseId) || storage.warehouses[0];
+
+    const invoice: InboundInvoice = {
+      id: `inb-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
+      accessKey: parsed.accessKey,
+      number: parsed.number,
+      series: parsed.series,
+      issueDate: parsed.issueDate,
+      entryDate: new Date().toISOString().split('T')[0],
+      supplierId: partner.id,
+      supplierName: partner.name,
+      supplierDocument: partner.formattedDocument,
+      supplierStateRegistration: partner.stateRegistration,
+      purchaseOrderId: po?.id,
+      purchaseOrderNumber: po?.number,
+      warehouseId: wh?.id || 'wh-default',
+      warehouseName: wh?.name || 'Almoxarifado Principal',
+      totalProducts: parsed.totals.products,
+      totalFreight: parsed.totals.freight,
+      totalInsurance: parsed.totals.insurance,
+      totalDiscount: parsed.totals.discount,
+      totalIPI: parsed.totals.ipi,
+      totalICMS: parsed.totals.icms,
+      totalPIS: parsed.totals.pis,
+      totalCOFINS: parsed.totals.cofins,
+      netTotal: parsed.totals.netTotal,
+      status: 'IMPORTADA',
+      items: mappedItems,
+      installments: parsed.installments,
+      xmlRaw: xmlContent,
+      createdById: user.id,
+      createdByName: user.name,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    storage.inboundInvoices.unshift(invoice);
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'IMPORT',
+      'INBOUND_INVOICE',
+      invoice.id,
+      {
+        number: invoice.number,
+        series: invoice.series,
+        supplierName: invoice.supplierName,
+        netTotal: invoice.netTotal,
+        accessKey: invoice.accessKey,
+      },
+      user.id
+    );
+
+    return invoice;
+  }
+
+  public processInboundInvoice(
+    schemaNamespace: string,
+    id: string,
+    user: { id: string; name: string }
+  ): { invoice: InboundInvoice; stockMovementsCount: number; payablesCount: number } {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema namespace '${schemaNamespace}' não encontrado.`);
+
+    const invoice = storage.inboundInvoices.find((i) => i.id === id);
+    if (!invoice) throw new Error(`Nota Fiscal de Entrada ID ${id} não encontrada.`);
+    if (invoice.status === 'PROCESSADA') {
+      throw new Error(`Esta NF-e de Entrada já foi processada em ${invoice.processedAt}.`);
+    }
+
+    const targetWarehouse = storage.warehouses.find((w) => w.id === invoice.warehouseId) || storage.warehouses[0];
+    const targetWarehouseId = targetWarehouse?.id || 'wh-default';
+    const targetWarehouseName = targetWarehouse?.name || 'Almoxarifado Principal';
+    let stockMovementsCount = 0;
+    let payablesCount = 0;
+
+    // 1. INTEGRAÇÃO FÍSICA: Movimentação de Estoque & Recálculo de Custo Médio Ponderado
+    for (const item of invoice.items) {
+      let product = storage.products.find(
+        (p) => p.id === item.internalProductId || p.code.toLowerCase() === item.productCodeSupplier.toLowerCase()
+      );
+
+      if (!product) {
+        product = {
+          id: `prd-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
+          code: item.productCodeSupplier,
+          name: item.productName,
+          type: 'PRODUCT',
+          unit: item.unit,
+          unitPrice: ProcurementMath.roundBRL(item.unitPrice * 1.4),
+          costPrice: item.unitPrice,
+          status: 'ATIVO',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        storage.products.push(product);
+        item.internalProductId = product.id;
+        item.internalProductCode = product.code;
+        item.internalProductName = product.name;
+      }
+
+      let stock = storage.stockItems.find(
+        (s) => s.productId === product!.id && s.warehouseId === targetWarehouseId
+      );
+
+      const currentQty = stock ? stock.quantity : 0;
+      const currentAvgCost = stock ? stock.averageCost : product.costPrice || item.unitPrice;
+      const incomingQty = item.quantity;
+      const incomingPrice = item.unitPrice;
+
+      const newTotalQty = currentQty + incomingQty;
+      const newAvgCost = newTotalQty > 0
+        ? ProcurementMath.roundBRL((currentQty * currentAvgCost + incomingQty * incomingPrice) / newTotalQty)
+        : incomingPrice;
+
+      const company = Array.from(this.companies.values()).find((c) => c.schemaNamespace === schemaNamespace);
+      const companyId = company?.id || 'comp-alfa';
+
+      if (!stock) {
+        stock = {
+          id: `stk-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`,
+          companyId,
+          productId: product.id,
+          productCode: product.code,
+          productName: product.name,
+          productUnit: product.unit || 'UN',
+          warehouseId: targetWarehouseId,
+          warehouseName: targetWarehouseName,
+          quantity: incomingQty,
+          reservedQuantity: 0,
+          availableQuantity: incomingQty,
+          averageCost: newAvgCost,
+          lastCost: incomingPrice,
+          totalValue: ProcurementMath.roundBRL(incomingQty * newAvgCost),
+          minQuantity: 10,
+          maxQuantity: 1000,
+          updatedAt: new Date().toISOString(),
+        };
+        storage.stockItems.push(stock);
+      } else {
+        stock.quantity = newTotalQty;
+        stock.availableQuantity = Math.max(0, stock.quantity - stock.reservedQuantity);
+        stock.averageCost = newAvgCost;
+        stock.lastCost = incomingPrice;
+        stock.totalValue = ProcurementMath.roundBRL(stock.quantity * newAvgCost);
+        stock.updatedAt = new Date().toISOString();
+      }
+
+      product.costPrice = newAvgCost;
+      product.updatedAt = new Date().toISOString();
+
+      const mvtCounter = (storage.sequentialCounters.inventoryMovement || 0) + 1;
+      storage.sequentialCounters.inventoryMovement = mvtCounter;
+
+      const movement: StockMovement = {
+        id: `mov-${Date.now().toString(36)}-${mvtCounter}`,
+        companyId,
+        movementNumber: `MOV-${String(mvtCounter).padStart(6, '0')}`,
+        movementType: 'INBOUND_PURCHASE',
+        productId: product.id,
+        productCode: product.code,
+        productName: product.name,
+        productUnit: product.unit || 'UN',
+        warehouseId: targetWarehouseId,
+        warehouseName: targetWarehouseName,
+        quantity: incomingQty,
+        unitCost: incomingPrice,
+        totalCost: ProcurementMath.roundBRL(incomingQty * incomingPrice),
+        previousStock: currentQty,
+        currentStock: newTotalQty,
+        previousAverageCost: currentAvgCost,
+        newAverageCost: newAvgCost,
+        referenceType: 'PURCHASE',
+        referenceId: invoice.id,
+        referenceDocument: `NF-${invoice.number}`,
+        batchNumber: item.batchNumber || `NF${invoice.number}`,
+        notes: `Entrada física da NF-e ${invoice.number} emitida por ${invoice.supplierName}. CFOP: ${item.cfop}.`,
+        createdById: user.id,
+        createdByName: user.name,
+        createdAt: new Date().toISOString(),
+      };
+
+      storage.stockMovements.unshift(movement);
+      stockMovementsCount++;
+    }
+
+    // 2. INTEGRAÇÃO FINANCEIRA: Geração Automática das Contas a Pagar
+    const coaAccount = storage.chartOfAccounts.find((c) => c.category === 'PASSIVO' && c.type === 'ANALITICA');
+    const costCenter = storage.costCenters[0];
+
+    for (const inst of invoice.installments) {
+      const pagCounter = (storage.sequentialCounters.payable || 0) + 1;
+      storage.sequentialCounters.payable = pagCounter;
+
+      const payable: AccountPayable = {
+        id: `pag-inb-${Date.now().toString(36)}-${pagCounter}`,
+        number: `PAG-${String(pagCounter).padStart(6, '0')}`,
+        supplierId: invoice.supplierId || 'ptn-default',
+        supplierName: invoice.supplierName,
+        supplierDocument: invoice.supplierDocument,
+        chartOfAccountId: coaAccount?.id || 'coa-alfa-05',
+        chartOfAccountCode: coaAccount?.code || '2.1.1.01',
+        costCenterId: costCenter?.id || 'cc-alfa-01',
+        costCenterCode: costCenter?.code || 'CC-01',
+        description: `Entrada NF-e Nº ${invoice.number} (${invoice.supplierName}) - Parc. ${inst.number}`,
+        issueDate: invoice.issueDate,
+        dueDate: inst.dueDate,
+        originalValue: inst.amount,
+        discountValue: 0,
+        fineValue: 0,
+        interestValue: 0,
+        paidValue: 0,
+        balanceValue: inst.amount,
+        status: 'OPEN',
+        paymentMethod: 'BOLETO',
+        createdBy: user.name,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      storage.accountsPayable.unshift(payable);
+      payablesCount++;
+    }
+
+    // 3. INTEGRAÇÃO COM PEDIDO DE COMPRA
+    if (invoice.purchaseOrderId) {
+      const order = storage.purchaseOrders.find((p) => p.id === invoice.purchaseOrderId);
+      if (order) {
+        for (const item of invoice.items) {
+          const poItem = order.items.find(
+            (pi) => (item.internalProductId && pi.productId === item.internalProductId) ||
+                    (pi.productCode && item.productCodeSupplier && pi.productCode.toLowerCase() === item.productCodeSupplier.toLowerCase())
+          );
+          if (poItem) {
+            poItem.quantityReceived = (poItem.quantityReceived || 0) + item.quantity;
+          }
+        }
+
+        const allReceived = order.items.every((it) => (it.quantityReceived || 0) >= it.quantity);
+        const anyReceived = order.items.some((it) => (it.quantityReceived || 0) > 0);
+
+        if (allReceived) {
+          order.status = 'RECEBIDO_TOTAL';
+        } else if (anyReceived) {
+          order.status = 'RECEBIDO_PARCIAL';
+        }
+        order.updatedAt = new Date().toISOString();
+      }
+    }
+
+    // 4. Conclusão do Processamento
+    invoice.status = 'PROCESSADA';
+    invoice.processedAt = new Date().toISOString();
+    invoice.processedByName = user.name;
+    invoice.updatedAt = new Date().toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'PROCESS',
+      'INBOUND_INVOICE',
+      invoice.id,
+      {
+        number: invoice.number,
+        stockMovementsCount,
+        payablesCount,
+        netTotal: invoice.netTotal,
+      },
+      user.id
+    );
+
+    return { invoice, stockMovementsCount, payablesCount };
+  }
+
+  // MÉTRICAS CONSOLIDADAS DO DASHBOARD DE COMPRAS
+  public getPurchasesMetrics(schemaNamespace: string): PurchasesDashboardMetrics {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) {
+      return {
+        totalSpentPeriod: 0,
+        activeOrdersCount: 0,
+        pendingRequisitionsCount: 0,
+        pendingApprovalOrdersCount: 0,
+        averageLeadTimeDays: 0,
+        totalQuotationsSavings: 0,
+        recentOrders: [],
+        topSuppliers: [],
+      };
+    }
+
+    const pendingRequisitionsCount = (storage.purchaseRequisitions || []).filter(
+      (r) => r.status === 'PENDENTE_APROVACAO' || r.status === 'RASCUNHO' || r.status === 'EM_COTACAO'
+    ).length;
+
+    const pendingApprovalOrdersCount = (storage.purchaseOrders || []).filter(
+      (o) => o.status === 'PENDENTE_APROVACAO'
+    ).length;
+
+    const activeOrdersCount = (storage.purchaseOrders || []).filter(
+      (o) => o.status === 'APROVADO' || o.status === 'EMITIDO_AO_FORNECEDOR' || o.status === 'RECEBIDO_PARCIAL'
+    ).length;
+
+    const totalSpentPeriod = (storage.purchaseOrders || [])
+      .filter((o) => o.status !== 'CANCELADO' && o.status !== 'REJEITADO')
+      .reduce((acc, o) => acc + o.grandTotal, 0);
+
+    const totalQuotationsSavings = (storage.purchaseQuotations || [])
+      .reduce((acc, q) => acc + (q.savingsAmount || 0), 0);
+
+    const supplierMap = new Map<string, { totalAmount: number; count: number }>();
+    for (const order of storage.purchaseOrders || []) {
+      if (order.status !== 'CANCELADO' && order.status !== 'REJEITADO') {
+        const curr = supplierMap.get(order.supplierName) || { totalAmount: 0, count: 0 };
+        curr.totalAmount += order.grandTotal;
+        curr.count += 1;
+        supplierMap.set(order.supplierName, curr);
+      }
+    }
+
+    const topSuppliers = Array.from(supplierMap.entries())
+      .map(([supplierName, stats]) => ({
+        supplierName,
+        totalAmount: ProcurementMath.roundBRL(stats.totalAmount),
+        count: stats.count,
+      }))
+      .sort((a, b) => b.totalAmount - a.totalAmount)
+      .slice(0, 5);
+
+    const recentOrders = [...(storage.purchaseOrders || [])]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, 5);
+
+    return {
+      totalSpentPeriod: ProcurementMath.roundBRL(totalSpentPeriod),
+      activeOrdersCount,
+      pendingRequisitionsCount,
+      pendingApprovalOrdersCount,
+      averageLeadTimeDays: 7,
+      totalQuotationsSavings: ProcurementMath.roundBRL(totalQuotationsSavings),
+      recentOrders,
+      topSuppliers,
+    };
+  }
+
+  // ============================================================================
+  // PRD 09 — COBRANÇA BANCÁRIA, BOLETOS REGISTRADOS, PIX & CNAB (240/400)
+  // ============================================================================
+
+  listBankSlips(schemaNamespace: string, filter?: { status?: string; search?: string }): BankSlip[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    let list = storage.bankSlips || [];
+    if (filter?.status && filter.status !== 'ALL') {
+      list = list.filter((b) => b.status === filter.status);
+    }
+    if (filter?.search) {
+      const q = filter.search.toLowerCase();
+      list = list.filter(
+        (b) =>
+          b.ourNumber.includes(q) ||
+          b.documentNumber.toLowerCase().includes(q) ||
+          b.payerName.toLowerCase().includes(q) ||
+          b.payerDocument.includes(q)
+      );
+    }
+    return [...list].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  getBankSlipById(schemaNamespace: string, id: string): BankSlip | undefined {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+    return (storage.bankSlips || []).find((b) => b.id === id);
+  }
+
+  createBankSlip(
+    schemaNamespace: string,
+    data: {
+      accountReceivableId?: string;
+      bankAccountId?: string;
+      bankCode?: string;
+      wallet?: string;
+      payerName: string;
+      payerDocument: string;
+      payerAddress?: string;
+      amount: number;
+      dueDate: string;
+      instructions?: string[];
+      finePercent?: number;
+      interestMonthlyPercent?: number;
+    },
+    user: { id: string; name?: string; email?: string }
+  ): BankSlip {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const company = Array.from(this.companies.values()).find((c) => c.schemaNamespace === schemaNamespace);
+    if (!company) throw new Error(`Empresa com schema [${schemaNamespace}] não localizada.`);
+
+    // Localiza conta bancária
+    const bankAccount = data.bankAccountId
+      ? storage.bankAccounts.find((b) => b.id === data.bankAccountId)
+      : storage.bankAccounts[0];
+
+    const bankCode = data.bankCode || bankAccount?.bankCode || '341';
+    const bankCfg = SUPPORTED_BANKS[bankCode] || SUPPORTED_BANKS['341'];
+    const wallet = data.wallet || bankCfg.defaultWallet;
+    const agency = bankAccount?.agency || '1234';
+    const account = bankAccount?.accountNumber || '12345';
+
+    // Incrementa contador sequencial de Nosso Número
+    const slipCounter = (storage.sequentialCounters.bankSlip || 0) + 1;
+    storage.sequentialCounters.bankSlip = slipCounter;
+    const ourNumber = String(slipCounter).padStart(11, '0');
+
+    // Document Number
+    let docNumber = `BOL-${String(slipCounter).padStart(6, '0')}`;
+    let rec: AccountReceivable | undefined;
+    if (data.accountReceivableId) {
+      rec = storage.accountsReceivable.find((r) => r.id === data.accountReceivableId);
+      if (rec) {
+        docNumber = rec.number;
+      }
+    }
+
+    // Calcula Campo Livre, Código de Barras e Linha Digitável
+    const freeField = BoletoMath.generateFreeField({
+      bankCode,
+      agency,
+      account,
+      wallet,
+      ourNumber,
+    });
+
+    const { barcode } = BoletoMath.buildBarcode({
+      bankCode,
+      amount: data.amount,
+      dueDate: data.dueDate,
+      freeField,
+    });
+
+    const digitableLine = BoletoMath.buildDigitableLine(barcode);
+
+    const slip: BankSlip = {
+      id: `bs-${Date.now().toString(36)}-${slipCounter}`,
+      ourNumber,
+      documentNumber: docNumber,
+      barcode,
+      digitableLine,
+      bankCode,
+      bankName: bankCfg.name,
+      agency,
+      account,
+      wallet,
+      payerName: data.payerName,
+      payerDocument: cleanDocument(data.payerDocument),
+      payerAddress: data.payerAddress || 'Endereço Comercial',
+      beneficiaryName: company.legalName,
+      beneficiaryDocument: company.cnpj,
+      issueDate: new Date().toISOString().split('T')[0],
+      dueDate: data.dueDate,
+      amount: BoletoMath.roundBRL(data.amount),
+      finePercent: data.finePercent ?? 2.0,
+      interestMonthlyPercent: data.interestMonthlyPercent ?? 1.0,
+      status: 'REGISTERED',
+      accountReceivableId: data.accountReceivableId,
+      instructions: data.instructions || [
+        'NÃO RECEBER APÓS 30 DIAS DO VENCIMENTO.',
+        'APÓS O VENCIMENTO COBRAR MULTA DE 2,0% E JUROS DE 1,0% AO MÊS.',
+      ],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    storage.bankSlips.unshift(slip);
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'BANK_SLIP_CREATE',
+      'bank_slips',
+      slip.id,
+      {
+        ourNumber: slip.ourNumber,
+        amount: slip.amount,
+        bankCode: slip.bankCode,
+        payer: slip.payerName,
+      },
+      user.id
+    );
+
+    return slip;
+  }
+
+  cancelBankSlip(schemaNamespace: string, id: string, reason: string, user: { id: string; name?: string; email?: string }): BankSlip {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const slip = (storage.bankSlips || []).find((b) => b.id === id);
+    if (!slip) throw new Error(`Boleto [${id}] não encontrado.`);
+
+    if (slip.status === 'PAID') {
+      throw new Error(`Não é possível cancelar um boleto que já foi liquidado.`);
+    }
+
+    slip.status = 'CANCELED';
+    slip.updatedAt = new Date().toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'BANK_SLIP_CANCEL',
+      'bank_slips',
+      slip.id,
+      { reason, ourNumber: slip.ourNumber },
+      user.id
+    );
+
+    return slip;
+  }
+
+  listPixCharges(schemaNamespace: string): PixCharge[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+    return [...(storage.pixCharges || [])].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  createPixCharge(
+    schemaNamespace: string,
+    data: {
+      accountReceivableId?: string;
+      customerName: string;
+      customerDocument: string;
+      amount: number;
+      description?: string;
+      keyType?: PixKeyType;
+      key?: string;
+    },
+    user: { id: string; name?: string; email?: string }
+  ): PixCharge {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const company = Array.from(this.companies.values()).find((c) => c.schemaNamespace === schemaNamespace);
+    if (!company) throw new Error(`Empresa com schema [${schemaNamespace}] não localizada.`);
+
+    const txid = `TX${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+    const key = data.key || company.cleanCnpj;
+    const keyType = data.keyType || 'CNPJ';
+
+    const emvPayload = PixEngine.generatePixPayload({
+      key,
+      amount: data.amount,
+      merchantName: company.legalName,
+      merchantCity: 'SAO PAULO',
+      txid,
+      description: data.description || 'Cobrança Enlace ERP',
+    });
+
+    const qrCodeSvg = PixEngine.generateQrCodeSvg(txid);
+
+    const charge: PixCharge = {
+      id: `pix-${Date.now().toString(36)}`,
+      txid,
+      accountReceivableId: data.accountReceivableId,
+      customerName: data.customerName,
+      customerDocument: cleanDocument(data.customerDocument),
+      description: data.description || `Cobrança Pix - ${company.tradeName || company.legalName}`,
+      amount: BoletoMath.roundBRL(data.amount),
+      keyType,
+      key,
+      emvPayload,
+      qrCodeSvg,
+      status: 'ACTIVE',
+      expiresAt: new Date(Date.now() + 30 * 86400000).toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    storage.pixCharges.unshift(charge);
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'PIX_CHARGE_CREATE',
+      'pix_charges',
+      charge.id,
+      { txid: charge.txid, amount: charge.amount, customer: charge.customerName },
+      user.id
+    );
+
+    return charge;
+  }
+
+  simulatePixPayment(schemaNamespace: string, txid: string, user: { id: string; name?: string; email?: string }): { charge: PixCharge; settlementLog: string } {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const charge = (storage.pixCharges || []).find((p) => p.txid === txid);
+    if (!charge) throw new Error(`Cobrança Pix [${txid}] não localizada.`);
+
+    if (charge.status === 'CONCLUDED') {
+      return { charge, settlementLog: 'Esta cobrança já foi liquidada anteriormente.' };
+    }
+
+    const endToEndId = `E${Date.now()}BACEN${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+    charge.status = 'CONCLUDED';
+    charge.paidAt = new Date().toISOString();
+    charge.endToEndId = endToEndId;
+    charge.updatedAt = new Date().toISOString();
+
+    let settlementLog = `Pix liquidado com sucesso instantaneamente via SPI/Bacen. EndToEndId: ${endToEndId}.`;
+
+    // Baixa automática no Contas a Receber se vinculado
+    if (charge.accountReceivableId) {
+      const rec = storage.accountsReceivable.find((r) => r.id === charge.accountReceivableId);
+      if (rec && rec.status !== 'PAID') {
+        rec.status = 'PAID';
+        rec.paidValue = rec.originalValue;
+        rec.balanceValue = 0;
+        rec.paidAt = new Date().toISOString();
+        rec.updatedAt = new Date().toISOString();
+        settlementLog += ` Baixa automática efetuada no título a receber [${rec.number}].`;
+      }
+    }
+
+    // Crédito na Tesouraria (independente de haver título vinculado)
+    const bankAccount = storage.bankAccounts[0];
+    if (bankAccount) {
+      bankAccount.currentBalance = BoletoMath.roundBRL(bankAccount.currentBalance + charge.amount);
+      storage.bankTransactions.unshift({
+        id: `btx-pix-${Date.now().toString(36)}`,
+        bankAccountId: bankAccount.id,
+        date: new Date().toISOString().split('T')[0],
+        type: 'CREDIT',
+        amount: charge.amount,
+        description: `Liquidação Pix Dinâmico ${charge.txid} - ${charge.customerName}`,
+        category: 'RECEBIMENTO_CLIENTES',
+        relatedTitleType: charge.accountReceivableId ? 'RECEIVABLE' : undefined,
+        relatedTitleId: charge.accountReceivableId,
+        reconciled: true,
+        createdAt: new Date().toISOString(),
+      });
+      settlementLog += ` Saldo creditado na conta [${bankAccount.name}].`;
+    }
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'PIX_PAYMENT_SIMULATED',
+      'pix_charges',
+      charge.id,
+      { txid: charge.txid, endToEndId, amount: charge.amount },
+      user.id
+    );
+
+    return { charge, settlementLog };
+  }
+
+  listCnabFiles(schemaNamespace: string): CnabFile[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+    return [...(storage.cnabFiles || [])].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  generateCnabRemessa(
+    schemaNamespace: string,
+    params: {
+      bankAccountId: string;
+      bankSlipIds?: string[];
+      standard?: CnabStandard;
+    },
+    user: { id: string; name?: string; email?: string }
+  ): CnabFile {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const company = Array.from(this.companies.values()).find((c) => c.schemaNamespace === schemaNamespace);
+    if (!company) throw new Error(`Empresa com schema [${schemaNamespace}] não localizada.`);
+
+    const bankAccount = storage.bankAccounts.find((b) => b.id === params.bankAccountId);
+    if (!bankAccount) throw new Error(`Conta bancária selecionada não encontrada.`);
+
+    let slipsToInclude = storage.bankSlips || [];
+    if (params.bankSlipIds && params.bankSlipIds.length > 0) {
+      slipsToInclude = slipsToInclude.filter((s) => params.bankSlipIds!.includes(s.id));
+    } else {
+      slipsToInclude = slipsToInclude.filter((s) => s.status === 'REGISTERED' || s.status === 'DRAFT');
+    }
+
+    if (slipsToInclude.length === 0) {
+      throw new Error(`Nenhum boleto selecionado ou pendente de remessa para a conta bancária.`);
+    }
+
+    const seqCounter = (storage.sequentialCounters.cnabRemessa || 0) + 1;
+    storage.sequentialCounters.cnabRemessa = seqCounter;
+
+    const bankCode = bankAccount.bankCode || '001';
+    const bankCfg = SUPPORTED_BANKS[bankCode] || SUPPORTED_BANKS['001'];
+    const standard = params.standard || 'CNAB400';
+
+    const contentRaw = CnabEngine.generateRemessaCnab400({
+      bankCode,
+      companyLegalName: company.legalName,
+      companyCnpj: company.cnpj,
+      bankAccount,
+      sequenceNumber: seqCounter,
+      slips: slipsToInclude,
+    });
+
+    const totalAmount = slipsToInclude.reduce((sum, s) => sum + s.amount, 0);
+
+    const cnabFile: CnabFile = {
+      id: `cnab-rem-${Date.now().toString(36)}-${seqCounter}`,
+      filename: `CB${bankCode}${String(seqCounter).padStart(4, '0')}.REM`,
+      type: 'REMESSA',
+      standard,
+      bankCode,
+      bankName: bankCfg.name,
+      bankAccountId: bankAccount.id,
+      sequenceNumber: seqCounter,
+      generationDate: new Date().toISOString(),
+      totalRecords: slipsToInclude.length + 2,
+      totalAmount: BoletoMath.roundBRL(totalAmount),
+      status: 'GENERATED',
+      contentRaw,
+      itemsCount: slipsToInclude.length,
+      itemsSuccessCount: slipsToInclude.length,
+      itemsErrorCount: 0,
+      processingLog: [
+        `Arquivo de remessa gerado com sucesso contendo ${slipsToInclude.length} títulos.`,
+        `Sequencial: ${seqCounter} • Layout: ${standard} • Banco: ${bankCfg.name}.`,
+      ],
+      createdById: user.id,
+      createdByName: user.name || 'Operador Financeiro',
+      createdAt: new Date().toISOString(),
+    };
+
+    // Marca boletos como transmitidos/registrados
+    for (const slip of slipsToInclude) {
+      slip.status = 'REGISTERED';
+      slip.updatedAt = new Date().toISOString();
+    }
+
+    storage.cnabFiles.unshift(cnabFile);
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'CNAB_REMESSA_GENERATE',
+      'cnab_files',
+      cnabFile.id,
+      {
+        filename: cnabFile.filename,
+        itemsCount: slipsToInclude.length,
+        totalAmount,
+      },
+      user.id
+    );
+
+    return cnabFile;
+  }
+
+  processCnabRetorno(
+    schemaNamespace: string,
+    params: {
+      contentRaw: string;
+      bankAccountId: string;
+    },
+    user: { id: string; name?: string; email?: string }
+  ): { cnabFile: CnabFile; settledSlipsCount: number; totalSettledAmount: number } {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const bankAccount = storage.bankAccounts.find((b) => b.id === params.bankAccountId);
+    if (!bankAccount) throw new Error(`Conta bancária de destino não encontrada.`);
+
+    const parsed = CnabEngine.parseRetornoCnab(params.contentRaw);
+    const bankCfg = SUPPORTED_BANKS[parsed.bankCode] || SUPPORTED_BANKS['001'];
+
+    let settledCount = 0;
+    let totalSettled = 0;
+    const processingLogs: string[] = [
+      `Iniciando leitura de arquivo de Retorno ${parsed.standard} do banco ${bankCfg.name}.`,
+      `Total de registros lidos: ${parsed.totalRecords}.`,
+    ];
+
+    for (const occ of parsed.occurrences) {
+      if (occ.isSettlement) {
+        // Tenta localizar o boleto por Nosso Número ou Número do Documento
+        const cleanOur = occ.ourNumber.replace(/\D/g, '');
+        const slip = (storage.bankSlips || []).find((b) => {
+          const bClean = b.ourNumber.replace(/\D/g, '');
+          return (
+            (cleanOur && bClean.endsWith(cleanOur)) ||
+            (b.documentNumber && b.documentNumber.includes(occ.documentNumber))
+          );
+        });
+
+        if (slip) {
+          slip.status = 'PAID';
+          slip.paidAmount = occ.paidAmount;
+          slip.paidDate = occ.paymentDate;
+          slip.updatedAt = new Date().toISOString();
+          settledCount++;
+          totalSettled += occ.paidAmount;
+          processingLogs.push(
+            `Boleto [${slip.ourNumber}] liquidado com sucesso. Valor: R$ ${occ.paidAmount.toFixed(2)}. Data: ${occ.paymentDate}.`
+          );
+
+          // Baixa na Conta a Receber correspondente
+          if (slip.accountReceivableId) {
+            const rec = storage.accountsReceivable.find((r) => r.id === slip.accountReceivableId);
+            if (rec && rec.status !== 'PAID') {
+              rec.status = 'PAID';
+              rec.paidValue = occ.paidAmount;
+              rec.balanceValue = 0;
+              rec.paidAt = occ.paymentDate;
+              rec.updatedAt = new Date().toISOString();
+              processingLogs.push(`Título a receber [${rec.number}] conciliado e baixado.`);
+            }
+          }
+        } else {
+          processingLogs.push(
+            `Aviso: Boleto com Nosso Número [${occ.ourNumber}] não encontrado no sistema. Pagamento registrado como crédito avulso.`
+          );
+        }
+      }
+    }
+
+    // Se houve liquidações, atualiza saldo e gera transação bancária
+    if (totalSettled > 0) {
+      bankAccount.currentBalance = BoletoMath.roundBRL(bankAccount.currentBalance + totalSettled);
+      storage.bankTransactions.unshift({
+        id: `btx-cnab-${Date.now().toString(36)}`,
+        bankAccountId: bankAccount.id,
+        date: new Date().toISOString().split('T')[0],
+        type: 'CREDIT',
+        amount: BoletoMath.roundBRL(totalSettled),
+        description: `Crédito em Lote Arquivo de Retorno CNAB - ${settledCount} títulos liquidados`,
+        category: 'RECEBIMENTO_CLIENTES',
+        reconciled: true,
+        createdAt: new Date().toISOString(),
+      });
+      processingLogs.push(`Saldo da conta bancária [${bankAccount.name}] atualizado com crédito de R$ ${totalSettled.toFixed(2)}.`);
+    }
+
+    const cnabFile: CnabFile = {
+      id: `cnab-ret-${Date.now().toString(36)}`,
+      filename: `RET_${parsed.bankCode}_${new Date().toISOString().split('T')[0].replace(/-/g, '')}.RET`,
+      type: 'RETORNO',
+      standard: parsed.standard,
+      bankCode: parsed.bankCode,
+      bankName: bankCfg.name,
+      bankAccountId: bankAccount.id,
+      sequenceNumber: 1,
+      generationDate: new Date().toISOString(),
+      totalRecords: parsed.totalRecords,
+      totalAmount: BoletoMath.roundBRL(totalSettled),
+      status: 'PROCESSED',
+      contentRaw: params.contentRaw,
+      itemsCount: parsed.occurrences.length,
+      itemsSuccessCount: settledCount,
+      itemsErrorCount: parsed.occurrences.length - settledCount,
+      processingLog: processingLogs,
+      createdById: user.id,
+      createdByName: user.name || 'Operador Financeiro',
+      createdAt: new Date().toISOString(),
+      processedAt: new Date().toISOString(),
+    };
+
+    storage.cnabFiles.unshift(cnabFile);
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'CNAB_RETORNO_PROCESS',
+      'cnab_files',
+      cnabFile.id,
+      {
+        settledCount,
+        totalSettled,
+        totalRecords: parsed.totalRecords,
+      },
+      user.id
+    );
+
+    return {
+      cnabFile,
+      settledSlipsCount: settledCount,
+      totalSettledAmount: BoletoMath.roundBRL(totalSettled),
+    };
+  }
+
+  getBankingDashboardMetrics(schemaNamespace: string): BankingDashboardMetrics {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const now = new Date();
+    const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+    const slips = storage.bankSlips || [];
+    const pixList = storage.pixCharges || [];
+    const receivables = storage.accountsReceivable || [];
+
+    // Contadores
+    const boletosActiveCount = slips.filter((s) => s.status === 'REGISTERED' || s.status === 'DRAFT').length;
+    const pixActiveCount = pixList.filter((p) => p.status === 'ACTIVE').length;
+    const pendingRemessaCount = slips.filter((s) => s.status === 'DRAFT' || s.status === 'REGISTERED').length;
+
+    // Total a cobrar
+    const totalToCollect = receivables
+      .filter((r) => r.status === 'OPEN' || r.status === 'PARTIALLY_PAID')
+      .reduce((sum, r) => sum + r.balanceValue, 0);
+
+    // Total liquidado no mês
+    const slipsPaidMonth = slips
+      .filter((s) => s.status === 'PAID' && s.paidDate && s.paidDate.startsWith(currentMonthPrefix))
+      .reduce((sum, s) => sum + (s.paidAmount || s.amount), 0);
+
+    const pixPaidMonth = pixList
+      .filter((p) => p.status === 'CONCLUDED' && p.paidAt && p.paidAt.startsWith(currentMonthPrefix))
+      .reduce((sum, p) => sum + p.amount, 0);
+
+    const totalCollectedMonth = BoletoMath.roundBRL(slipsPaidMonth + pixPaidMonth);
+
+    // Inadimplência
+    const todayStr = now.toISOString().split('T')[0];
+    let overdueAmount = 0;
+    let totalEligibleAmount = 0;
+
+    const aging = {
+      upTo30Days: 0,
+      from31To60Days: 0,
+      from61To90Days: 0,
+      above90Days: 0,
+      onTime: 0,
+    };
+
+    for (const rec of receivables) {
+      if (rec.status !== 'CANCELED') {
+        totalEligibleAmount += rec.originalValue;
+
+        if (rec.status === 'OPEN' || rec.status === 'PARTIALLY_PAID') {
+          if (rec.dueDate < todayStr) {
+            overdueAmount += rec.balanceValue;
+            const diffDays = Math.floor(
+              (new Date(todayStr).getTime() - new Date(rec.dueDate).getTime()) / 86400000
+            );
+            if (diffDays <= 30) aging.upTo30Days += rec.balanceValue;
+            else if (diffDays <= 60) aging.from31To60Days += rec.balanceValue;
+            else if (diffDays <= 90) aging.from61To90Days += rec.balanceValue;
+            else aging.above90Days += rec.balanceValue;
+          } else {
+            aging.onTime += rec.balanceValue;
+          }
+        }
+      }
+    }
+
+    const defaultRate = totalEligibleAmount > 0
+      ? BoletoMath.roundBRL((overdueAmount / totalEligibleAmount) * 100)
+      : 0;
+
+    // Volume por canal
+    const boletoVol = slips.filter((s) => s.status === 'PAID').reduce((sum, s) => sum + (s.paidAmount || s.amount), 0);
+    const pixVol = pixList.filter((p) => p.status === 'CONCLUDED').reduce((sum, p) => sum + p.amount, 0);
+    const transferVol = (storage.bankTransactions || [])
+      .filter((t) => t.type === 'CREDIT' && t.category === 'RECEBIMENTO_CLIENTES')
+      .reduce((sum, t) => sum + t.amount, 0) - (boletoVol + pixVol);
+
+    // Transações recentes
+    const recentTransactions: BankingDashboardMetrics['recentTransactions'] = [];
+    for (const s of slips.filter((x) => x.status === 'PAID').slice(0, 5)) {
+      recentTransactions.push({
+        id: s.id,
+        titleNumber: s.documentNumber,
+        customerName: s.payerName,
+        method: 'BOLETO',
+        amount: s.paidAmount || s.amount,
+        date: s.paidDate || s.issueDate,
+        status: 'LIQUIDADO',
+      });
+    }
+    for (const p of pixList.filter((x) => x.status === 'CONCLUDED').slice(0, 5)) {
+      recentTransactions.push({
+        id: p.id,
+        titleNumber: p.txid,
+        customerName: p.customerName,
+        method: 'PIX',
+        amount: p.amount,
+        date: p.paidAt ? p.paidAt.split('T')[0] : p.createdAt.split('T')[0],
+        status: 'LIQUIDADO_PIX',
+      });
+    }
+
+    return {
+      totalToCollect: BoletoMath.roundBRL(totalToCollect),
+      totalCollectedMonth,
+      defaultRate,
+      boletosActiveCount,
+      pixActiveCount,
+      pendingRemessaCount,
+      agingBreakdown: {
+        upTo30Days: BoletoMath.roundBRL(aging.upTo30Days),
+        from31To60Days: BoletoMath.roundBRL(aging.from31To60Days),
+        from61To90Days: BoletoMath.roundBRL(aging.from61To90Days),
+        above90Days: BoletoMath.roundBRL(aging.above90Days),
+        onTime: BoletoMath.roundBRL(aging.onTime),
+      },
+      channelPerformance: {
+        boletoVolume: BoletoMath.roundBRL(boletoVol),
+        pixVolume: BoletoMath.roundBRL(pixVol),
+        transferVolume: BoletoMath.roundBRL(Math.max(0, transferVol)),
+      },
+      recentTransactions: recentTransactions.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 8),
+    };
+  }
+
+  listDunningRules(schemaNamespace: string): CollectionDunningRule[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+    return storage.dunningRules || [];
+  }
+
+  createDunningRule(
+    schemaNamespace: string,
+    data: Partial<CollectionDunningRule>,
+    user: { id: string; name?: string; email?: string }
+  ): CollectionDunningRule {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const rule: CollectionDunningRule = {
+      id: `dun-${Date.now().toString(36)}`,
+      name: data.name || 'Nova Etapa de Cobrança',
+      triggerDays: data.triggerDays ?? 0,
+      channel: data.channel || 'EMAIL',
+      templateSubject: data.templateSubject || 'Notificação de Cobrança',
+      templateBody: data.templateBody || 'Prezado cliente, sua fatura está disponível.',
+      includePix: data.includePix ?? true,
+      includeBoleto: data.includeBoleto ?? true,
+      isActive: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    storage.dunningRules.push(rule);
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'DUNNING_RULE_CREATE',
+      'dunning_rules',
+      rule.id,
+      { name: rule.name, triggerDays: rule.triggerDays, channel: rule.channel },
+      user.id
+    );
+
+    return rule;
+  }
+
+  toggleDunningRule(
+    schemaNamespace: string,
+    id: string,
+    isActive: boolean,
+    user: { id: string; name?: string; email?: string }
+  ): CollectionDunningRule {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const rule = (storage.dunningRules || []).find((r) => r.id === id);
+    if (!rule) throw new Error(`Regra de cobrança [${id}] não encontrada.`);
+
+    rule.isActive = isActive;
+    rule.updatedAt = new Date().toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'DUNNING_RULE_TOGGLE',
+      'dunning_rules',
+      rule.id,
+      { isActive },
+      user.id
+    );
+
+    return rule;
+  }
+
+  executeDunningRules(
+    schemaNamespace: string,
+    user: { id: string; name?: string; email?: string }
+  ): { dispatchedCount: number; logs: string[] } {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const rules = (storage.dunningRules || []).filter((r) => r.isActive);
+    const slips = storage.bankSlips || [];
+    const now = new Date();
+
+    const logs: string[] = [];
+    let dispatchedCount = 0;
+
+    for (const rule of rules) {
+      const targetDate = new Date(now.getTime() - rule.triggerDays * 86400000);
+      const targetDateStr = targetDate.toISOString().split('T')[0];
+
+      const matchingSlips = slips.filter(
+        (s) => (s.status === 'REGISTERED' || s.status === 'DRAFT' || s.status === 'OVERDUE') && s.dueDate <= targetDateStr
+      );
+
+      if (matchingSlips.length > 0) {
+        for (const slip of matchingSlips) {
+          dispatchedCount++;
+          const channelName = rule.channel === 'EMAIL' ? 'E-mail' : rule.channel === 'WHATSAPP' ? 'WhatsApp' : 'SMS';
+          logs.push(
+            `[${channelName}] Disparo efetuado para ${slip.payerName} (Boleto ${slip.ourNumber}, Venc: ${slip.dueDate}, Valor: R$ ${slip.amount.toFixed(2)}) via regra "${rule.name}"`
+          );
+        }
+      } else {
+        logs.push(`Regra "${rule.name}" avaliada: nenhum título pendente elegível para a faixa de corte.`);
+      }
+    }
+
+    if (dispatchedCount === 0) {
+      logs.push(`Processamento concluído. Nenhum disparo foi necessário para a carteira atual.`);
+    }
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'DUNNING_RULES_EXECUTE',
+      'dunning_rules',
+      'batch-execution',
+      { rulesEvaluated: rules.length, dispatchedCount },
+      user.id
+    );
+
+    return { dispatchedCount, logs };
   }
 }
 

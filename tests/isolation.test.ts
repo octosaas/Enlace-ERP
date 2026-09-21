@@ -13,10 +13,15 @@ import { AIPrincipalManager } from '../src/core/security/aiPrincipal.js';
 import { validateFiscalDocument } from '../src/shared/validators.js';
 import { CommercialMath } from '../src/core/commercial/commercialEngine.js';
 import { FinancialMath, CashFlowEngine, IncomeStatementEngine } from '../src/core/financial/financialEngine.js';
+import { BillingMath, CompetenceHelper } from '../src/core/billing/billingEngine.js';
+import { InventoryMath } from '../src/core/inventory/inventoryEngine.js';
+import { FiscalMath } from '../src/core/fiscal/fiscalEngine.js';
+import { ProcurementMath, NFeXmlParser } from '../src/core/procurement/procurementEngine.js';
+import { BoletoMath, CnabEngine, PixEngine } from '../src/core/banking/bankingEngine.js';
 
 async function runTests() {
   console.log('================================================================');
-  console.log(' INICIANDO BATERIA DE TESTES DO ENLACE ERP - PRD 01 A 05        ');
+  console.log(' INICIANDO BATERIA DE TESTES DO ENLACE ERP - PRD 01 A 09        ');
   console.log('================================================================\n');
 
   await dbEngine.initialize();
@@ -455,6 +460,691 @@ async function runTests() {
     invoiceResult.receivable.customerId === osAlfaForInvoice.customerId &&
     invoiceResult.os.events.some((e) => e.description.includes('faturada')),
     '33. Pipeline Integrado: Faturamento de Ordem de Serviço para Contas a Receber (PRD 04 -> 05)'
+  );
+
+  // 34. Motor de Faturamento: Precisão Decimal, Snapshots Imutáveis e Arredondamento BRL (PRD PARTE 05 - Seção 15 e 16)
+  const roundTest = BillingMath.round(10.555) === 10.56 && BillingMath.round(10.554) === 10.55;
+  const itemCalc = BillingMath.calculateItem(3, 150.0, 50.0, 10.0);
+  const docCalc = BillingMath.calculateDocumentTotals(
+    [
+      { quantity: 2, unitPrice: 100.0, discount: 20 },
+      { quantity: 1, unitPrice: 200.0, surcharge: 15 },
+    ],
+    10,
+    5
+  );
+  const proRata = BillingMath.calculateProRata(3000.0, '2026-09-01', '2026-09-10', 30);
+  assert(
+    roundTest &&
+    itemCalc.subtotal === 450.0 &&
+    itemCalc.total === 410.0 &&
+    docCalc.subtotal === 400.0 &&
+    docCalc.total === 390.0 &&
+    proRata === 1000.0,
+    '34. Motor de Faturamento: Precisão Decimal, Snapshots Imutáveis e Arredondamento BRL (PRD PARTE 05)'
+  );
+
+  // 35. Faturamento Direto a partir de Pedido de Venda Comercial (PRD PARTE 05 - Seção 07 e 34)
+  const petrobrasPartner = dbEngine.listPartners(alfa.schemaNamespace).find((p) => p.document === '33000167000101') || dbEngine.listPartners(alfa.schemaNamespace)[0];
+  const sale = dbEngine.createSale(
+    alfa.schemaNamespace,
+    {
+      customerId: petrobrasPartner.id,
+      saleDate: '2026-09-15',
+      items: [
+        {
+          itemType: 'PRODUCT',
+          description: 'Válvula Esfera Inox 316',
+          quantity: 5,
+          unitPrice: 200.0,
+          discount: 50.0,
+          surcharge: 0.0,
+        },
+      ],
+      discount: 0,
+      surcharge: 0,
+      createdBy: 'Carlos Santos',
+    }
+  );
+  const billingFromSale = dbEngine.createBillingFromSale(
+    alfa.schemaNamespace,
+    sale.id,
+    'usr-carlos-alfa-01',
+    'Carlos Santos'
+  );
+  let dupSaleBillingBlocked = false;
+  try {
+    dbEngine.createBillingFromSale(alfa.schemaNamespace, sale.id, 'usr-carlos-alfa-01', 'Carlos Santos');
+  } catch {
+    dupSaleBillingBlocked = true;
+  }
+  assert(
+    billingFromSale.sourceType === 'SALE' &&
+    billingFromSale.sourceId === sale.id &&
+    billingFromSale.total === 950.0 &&
+    billingFromSale.status === 'ISSUED' &&
+    dupSaleBillingBlocked,
+    '35. Faturamento Direto de Pedido de Venda com Trava Anti-Duplicidade (PRD PARTE 05)'
+  );
+
+  // 36. Faturamento de Ordem de Serviço com Competência Fiscal MM/YYYY (PRD PARTE 05 - Seção 07 e 35)
+  const compInfo = CompetenceHelper.getCompetenceForDate('2026-09-19');
+  const osAlfaList = dbEngine.listServiceOrders(alfa.schemaNamespace);
+  const targetOs = osAlfaList[0];
+  const billingFromOs = dbEngine.createBillingFromServiceOrder(
+    alfa.schemaNamespace,
+    targetOs.id,
+    'usr-carlos-alfa-01',
+    'Carlos Santos'
+  );
+  assert(
+    compInfo.competenceLabel === '09/2026' &&
+    billingFromOs.sourceType === 'SERVICE_ORDER' &&
+    billingFromOs.sourceId === targetOs.id &&
+    billingFromOs.items.length >= 1 &&
+    billingFromOs.status === 'ISSUED',
+    '36. Faturamento de Ordem de Serviço com Competência Fiscal MM/YYYY (PRD PARTE 05)'
+  );
+
+  // 37. Contratos de Faturamento Recorrente e Regras de Vencimento Dinâmicas (PRD PARTE 05 - Seções 20 a 24)
+  const recurringContract = dbEngine.createRecurringBilling(
+    alfa.schemaNamespace,
+    {
+      customerId: petrobrasPartner.id,
+      customerName: petrobrasPartner.name,
+      customerDocument: petrobrasPartner.document,
+      description: 'Contrato Mensal de Suporte e Manutenção Industrial',
+      frequency: 'MONTHLY',
+      dayOfMonth: 10,
+      dueRule: 'FIXED_DAY',
+      dueDays: 10,
+      startDate: '2026-01-01',
+      nextBillingDate: '2026-09-10',
+      items: [
+        {
+          itemType: 'SERVICE',
+          description: 'SLA 24/7 e Monitoramento Contínuo',
+          quantity: 1,
+          unitPrice: 4500.0,
+        },
+      ],
+    },
+    'usr-carlos-alfa-01',
+    'Carlos Santos'
+  );
+  assert(
+    recurringContract.status === 'ACTIVE' &&
+    recurringContract.frequency === 'MONTHLY' &&
+    recurringContract.nextBillingDate === '2026-09-10' &&
+    recurringContract.amount === 4500.0,
+    '37. Contratos de Faturamento Recorrente e Regras de Vencimento Dinâmicas (PRD PARTE 05)'
+  );
+
+  // 38. Processamento em Lote Idempotente da Recorrência com Geração de Títulos e Logs (PRD PARTE 05 - Seções 21 a 24)
+  const batch1 = dbEngine.processDueRecurringBillings(alfa.schemaNamespace, 'usr-carlos-alfa-01', 'Carlos Santos');
+  const batch2 = dbEngine.processDueRecurringBillings(alfa.schemaNamespace, 'usr-carlos-alfa-01', 'Carlos Santos');
+  const logs = dbEngine.listBillingGenerationLogs(alfa.schemaNamespace);
+  const updatedContract = dbEngine.getRecurringBillingById(alfa.schemaNamespace, recurringContract.id);
+  assert(
+    batch1.generatedCount >= 1 &&
+    batch2.generatedCount === 0 &&
+    logs.length >= 1 &&
+    updatedContract?.nextBillingDate === '2026-10-10',
+    '38. Processamento em Lote Idempotente da Recorrência com Geração de Títulos e Logs (PRD PARTE 05)'
+  );
+
+  // 39. Cancelamento de Faturamento com Motivo Obrigatório e Conciliação de Estorno (PRD PARTE 05 - Seção 38)
+  let cancelNoReasonBlocked = false;
+  try {
+    dbEngine.cancelBillingDocument(alfa.schemaNamespace, billingFromSale.id, '', 'usr-carlos-alfa-01', 'Carlos Santos');
+  } catch {
+    cancelNoReasonBlocked = true;
+  }
+  const canceledDoc = dbEngine.cancelBillingDocument(
+    alfa.schemaNamespace,
+    billingFromSale.id,
+    'Cancelamento homologado para troca de pedido comercial',
+    'usr-carlos-alfa-01',
+    'Carlos Santos'
+  );
+  assert(
+    cancelNoReasonBlocked &&
+    canceledDoc.status === 'CANCELED' &&
+    canceledDoc.cancellationReason === 'Cancelamento homologado para troca de pedido comercial' &&
+    canceledDoc.canceledBy === 'Carlos Santos',
+    '39. Cancelamento de Faturamento com Motivo Obrigatório e Conciliação de Estorno (PRD PARTE 05)'
+  );
+
+  // 40. Isolamento Multi-Tenant Estrito de Faturamento e Contratos Recorrentes por Schema (PRD 01 & PRD 05)
+  const alfaBillings = dbEngine.listBillingDocuments(alfa.schemaNamespace);
+  const betaBillings = dbEngine.listBillingDocuments(beta.schemaNamespace);
+  const alfaRecurrings = dbEngine.listRecurringBillings(alfa.schemaNamespace);
+  const betaRecurrings = dbEngine.listRecurringBillings(beta.schemaNamespace);
+  const hasAlfaDocInBeta = betaBillings.some((b) => b.customerName.includes('Petrobras'));
+  const hasAlfaRecInBeta = betaRecurrings.some((r) => r.description.includes('Petrobras'));
+  assert(
+    alfaBillings.length >= 2 &&
+    alfaRecurrings.length >= 1 &&
+    !hasAlfaDocInBeta &&
+    !hasAlfaRecInBeta,
+    '40. Isolamento Multi-Tenant Estrito de Faturamento e Contratos Recorrentes por Schema (PRD 01 & PRD 05)'
+  );
+
+  // ============================================================================
+  // PRD 06 - ESTOQUE & ALMOXARIFADO (WMS)
+  // ============================================================================
+
+  // 41. Gestão de Múltiplos Depósitos e Isolamento Estrito por Schema (PRD 06)
+  const secWh = dbEngine.createWarehouse(
+    alfa.schemaNamespace,
+    {
+      name: 'Almoxarifado Filial Sul',
+      code: 'ALM-SUL',
+      description: 'Depósito secundário de distribuição',
+      location: 'Curitiba - PR',
+    },
+    alfa.id
+  );
+  const alfaWarehouses = dbEngine.listWarehouses(alfa.schemaNamespace);
+  const betaWarehouses = dbEngine.listWarehouses(beta.schemaNamespace);
+  const betaHasAlfaWh = betaWarehouses.some((w) => w.id === secWh.id || w.code === 'ALM-SUL');
+  assert(
+    secWh.code === 'ALM-SUL' &&
+    alfaWarehouses.some((w) => w.id === secWh.id) &&
+    !betaHasAlfaWh,
+    '41. Gestão de Múltiplos Depósitos e Isolamento Estrito por Schema (PRD 06)'
+  );
+
+  // 42. Movimentação de Entrada e Recálculo de Custo Médio Ponderado (CMP) (PRD 06)
+  const productA = storageAlfa.products[0];
+  const primaryWh = storageAlfa.warehouses[0];
+  const initialStock = dbEngine.getStockItem(alfa.schemaNamespace, primaryWh.id, productA.id);
+  const prevQty = initialStock ? initialStock.quantity : 0;
+  const prevCost = initialStock ? initialStock.averageCost : productA.costPrice || 50;
+
+  const inQty = 100;
+  const inUnitCost = 80;
+  const expectedCmp = InventoryMath.calculateCMP(prevQty, prevCost, inQty, inUnitCost);
+
+  const inboundMov = dbEngine.recordStockMovement(
+    alfa.schemaNamespace,
+    {
+      movementType: 'INBOUND_PURCHASE',
+      productId: productA.id,
+      warehouseId: primaryWh.id,
+      quantity: inQty,
+      unitCost: inUnitCost,
+      referenceType: 'PURCHASE',
+      notes: 'Lote inicial de reposição de estoque',
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+  const updatedStock = dbEngine.getStockItem(alfa.schemaNamespace, primaryWh.id, productA.id);
+  assert(
+    !!inboundMov &&
+    updatedStock !== undefined &&
+    updatedStock.quantity === expectedCmp.newQuantity &&
+    updatedStock.averageCost === expectedCmp.newAverageCost,
+    '42. Movimentação de Entrada e Recálculo de Custo Médio Ponderado (CMP) (PRD 06)'
+  );
+
+  // 43. Trava de Saldo Negativo e Transferência Física entre Depósitos (PRD 06)
+  let blockedNegativeStock = false;
+  try {
+    dbEngine.recordStockMovement(
+      alfa.schemaNamespace,
+      {
+        movementType: 'OUTBOUND_SALE',
+        productId: productA.id,
+        warehouseId: primaryWh.id,
+        quantity: 999999, // superior ao saldo existente
+      },
+      { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+    );
+  } catch {
+    blockedNegativeStock = true;
+  }
+
+  const transferResult = dbEngine.transferStock(
+    alfa.schemaNamespace,
+    {
+      sourceWarehouseId: primaryWh.id,
+      targetWarehouseId: secWh.id,
+      productId: productA.id,
+      quantity: 20,
+      notes: 'Transferência para filial Sul',
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+  const stockTarget = dbEngine.getStockItem(alfa.schemaNamespace, secWh.id, productA.id);
+  assert(
+    blockedNegativeStock &&
+    transferResult.outboundMovement.movementType === 'TRANSFER_OUT' &&
+    transferResult.inboundMovement.movementType === 'TRANSFER_IN' &&
+    stockTarget?.quantity === 20,
+    '43. Trava de Saldo Negativo e Transferência Física entre Depósitos (PRD 06)'
+  );
+
+  // ============================================================================
+  // PRD 07 - FISCAL & TRIBUTÁRIO BRASILEIRO (DF-e & SPED)
+  // ============================================================================
+
+  // 44. Emissão e Assinatura Digital de NF-e (Modelo 55) com Cálculo Tributário (PRD 07)
+  const petroPartner = storageAlfa.partners.find((p) => p.document.includes('33000167000101')) || storageAlfa.partners[0];
+  const fiscalDoc = dbEngine.createFiscalDocument(
+    alfa.schemaNamespace,
+    {
+      model: 'NFE_55',
+      type: 'OUTBOUND',
+      natureOfOperation: 'Venda de Produção do Estabelecimento',
+      cfopPrincipal: '5.101',
+      partnerId: petroPartner.id,
+      partnerName: petroPartner.name,
+      partnerCnpjCpf: petroPartner.document,
+      partnerAddress: {
+        street: petroPartner.address?.street || 'Av. Paulista',
+        number: petroPartner.address?.number || '1000',
+        neighborhood: petroPartner.address?.neighborhood || 'Bela Vista',
+        city: petroPartner.address?.city || 'São Paulo',
+        state: petroPartner.address?.state || 'SP',
+        zipCode: petroPartner.address?.zipCode || '01310-100',
+      },
+      items: [
+        {
+          productCode: productA.code,
+          productName: productA.name,
+          ncm: '8481.80.99',
+          cfop: '5.101',
+          quantity: 10,
+          unitPrice: 150.0,
+          unit: 'UN',
+        },
+      ],
+    },
+    'usr-carlos-alfa-01',
+    'Carlos Santos'
+  );
+  assert(
+    fiscalDoc.model === 'NFE_55' &&
+    fiscalDoc.accessKey.length === 44 &&
+    fiscalDoc.netTotal === 1500.0 &&
+    fiscalDoc.status === 'DRAFT' &&
+    fiscalDoc.totalICMS >= 0 &&
+    fiscalDoc.totalPIS >= 0,
+    '44. Emissão e Assinatura Digital de NF-e (Modelo 55) com Cálculo Tributário (PRD 07)'
+  );
+
+  // 45. Transmissão e Autorização SEFAZ com Protocolo e XML Imutável (PRD 07)
+  const authorizedDoc = dbEngine.transmitFiscalDocument(
+    alfa.schemaNamespace,
+    fiscalDoc.id,
+    'usr-carlos-alfa-01',
+    'Carlos Santos'
+  );
+  assert(
+    authorizedDoc.status === 'AUTHORIZED' &&
+    !!authorizedDoc.protocolNumber &&
+    !!authorizedDoc.authorizedAt &&
+    authorizedDoc.xmlPayload?.includes('<nfeProc') === true,
+    '45. Transmissão e Autorização SEFAZ com Protocolo e XML Imutável (PRD 07)'
+  );
+
+  // 46. Inutilização Homologada de Faixa Fiscal com Justificativa Mínima (PRD 07)
+  let inutShortJustificationBlocked = false;
+  try {
+    dbEngine.createFiscalInutilization(
+      alfa.schemaNamespace,
+      {
+        model: 'NFE_55',
+        series: '1',
+        startNumber: 100,
+        endNumber: 105,
+        year: 2026,
+        justification: 'Erro', // menor que 15 chars
+      },
+      'usr-carlos-alfa-01',
+      'Carlos Santos'
+    );
+  } catch {
+    inutShortJustificationBlocked = true;
+  }
+  const validInut = dbEngine.createFiscalInutilization(
+    alfa.schemaNamespace,
+    {
+      model: 'NFE_55',
+      series: '1',
+      startNumber: 100,
+      endNumber: 105,
+      year: 2026,
+      justification: 'Salto de numeracao ocorrido por falha no spool de emissao fiscal',
+    },
+    'usr-carlos-alfa-01',
+    'Carlos Santos'
+  );
+  assert(
+    inutShortJustificationBlocked &&
+    validInut.protocolNumber.startsWith('INUT-SEFAZ-') &&
+    validInut.startNumber === 100 &&
+    validInut.endNumber === 105,
+    '46. Inutilização Homologada de Faixa Fiscal com Justificativa Mínima (PRD 07)'
+  );
+
+  // ============================================================================
+  // PRD 08 - COMPRAS, SUPRIMENTOS & PROCUREMENT
+  // ============================================================================
+
+  // 47. Requisição de Compras e Fluxo de Aprovação com Centro de Custo (PRD 08)
+  const reqItem = {
+    id: 'req-item-01',
+    productId: productA.id,
+    productCode: productA.code,
+    productName: productA.name,
+    quantity: 50,
+    unit: 'UN',
+    estimatedUnitPrice: 60.0,
+    estimatedTotalPrice: 3000.0,
+  };
+  const purchaseReq = dbEngine.createPurchaseRequisition(
+    alfa.schemaNamespace,
+    {
+      justification: 'Aquisição emergencial de matéria-prima para manutenção',
+      priority: 'ALTA',
+      neededByDate: '2026-10-15',
+      items: [reqItem],
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+  const reqInitialStatus = purchaseReq.status;
+  const approvedReq = dbEngine.approvePurchaseRequisition(
+    alfa.schemaNamespace,
+    purchaseReq.id,
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+  assert(
+    purchaseReq.number.startsWith('RC-') &&
+    reqInitialStatus === 'PENDENTE_APROVACAO' &&
+    approvedReq.status === 'APROVADA' &&
+    approvedReq.approvedByName === 'Carlos Santos',
+    '47. Requisição de Compras e Fluxo de Aprovação com Centro de Custo (PRD 08)'
+  );
+
+  // 48. Mapa Comparativo de Cotações com Homologação e Cálculo de Economia (PRD 08)
+  const quotation = dbEngine.createPurchaseQuotation(
+    alfa.schemaNamespace,
+    {
+      requisitionIds: [approvedReq.id],
+      title: 'Cotação de Válvulas Industriais',
+      deadlineDate: '2026-10-20',
+      items: [
+        {
+          id: 'quot-item-01',
+          productId: productA.id,
+          productCode: productA.code,
+          productName: productA.name,
+          quantity: 50,
+          unit: 'UN',
+          targetPrice: 60.0,
+        },
+      ],
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+
+  dbEngine.addQuotationProposal(
+    alfa.schemaNamespace,
+    quotation.id,
+    {
+      supplierId: petroPartner.id,
+      supplierName: petroPartner.name,
+      supplierDocument: petroPartner.document,
+      paymentTerm: '30/60 dias',
+      deliveryDays: 5,
+      items: [
+        {
+          itemId: quotation.items[0].id,
+          productName: productA.name,
+          quantity: 50,
+          unit: 'UN',
+          unitPrice: 55.0,
+          discountPercentage: 0,
+          icmsPercentage: 18,
+          ipiPercentage: 5,
+          freightAmount: 0,
+          totalPrice: 2750.0,
+          deliveryDays: 5,
+        },
+      ],
+    }
+  );
+
+  const homologation = dbEngine.homologateQuotation(
+    alfa.schemaNamespace,
+    quotation.id,
+    petroPartner.id,
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' },
+    true
+  );
+  assert(
+    homologation.quotation.status === 'HOMOLOGADA' &&
+    homologation.quotation.winningSupplierId === petroPartner.id &&
+    homologation.purchaseOrder !== undefined &&
+    homologation.purchaseOrder.number.startsWith('PC-'),
+    '48. Mapa Comparativo de Cotações com Homologação e Cálculo de Economia (PRD 08)'
+  );
+
+  // 49. Entrada de Mercadorias (3-Way Matching): NF-e Fornecedor -> Estoque (CMP) + Contas a Pagar (PRD 08)
+  const initialPayablesCount = (storageAlfa.accountsPayable || []).length;
+  const mockXml = NFeXmlParser.generateSampleNFeXml({
+    supplierCnpj: petroPartner.document,
+    supplierName: petroPartner.name,
+    supplierIe: '109876543110',
+    items: [
+      {
+        code: productA.code,
+        name: productA.name,
+        qty: 50,
+        price: 55.0,
+        ncm: '84818099',
+        cfop: '1101',
+        batch: 'LOTE-VALV-2026',
+      },
+    ],
+  });
+
+  const importedNfe = dbEngine.importInboundInvoiceXml(
+    alfa.schemaNamespace,
+    mockXml,
+    primaryWh.id,
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' },
+    homologation.purchaseOrder?.id
+  );
+  const statusBeforeProcess = importedNfe.status;
+  const processResult = dbEngine.processInboundInvoice(
+    alfa.schemaNamespace,
+    importedNfe.id,
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+  const finalPayablesCount = (storageAlfa.accountsPayable || []).length;
+  assert(
+    importedNfe.number.length >= 1 &&
+    statusBeforeProcess === 'IMPORTADA' &&
+    processResult.invoice.status === 'PROCESSADA' &&
+    processResult.stockMovementsCount >= 1 &&
+    processResult.payablesCount >= 1 &&
+    finalPayablesCount > initialPayablesCount,
+    '49. Entrada de Mercadorias (3-Way Matching): NF-e Fornecedor -> Estoque (CMP) + Contas a Pagar (PRD 08)'
+  );
+
+  // ============================================================================
+  // PRD 09 - COBRANÇA BANCÁRIA, BOLETOS, PIX & CNAB
+  // ============================================================================
+
+  // 50. Emissão de Boleto Bancário com Linha Digitável e Código de Barras FEBRABAN (PRD 09)
+  const bankAcc = storageAlfa.bankAccounts[0];
+  const newSlip = dbEngine.createBankSlip(
+    alfa.schemaNamespace,
+    {
+      bankAccountId: bankAcc.id,
+      payerName: petroPartner.name,
+      payerDocument: petroPartner.document,
+      payerAddress: 'Av. Paulista, 1000 - São Paulo/SP',
+      amount: 1500.0,
+      dueDate: '2026-10-30',
+      instructions: ['Não receber após o vencimento. Cobrar juros de 1% ao mês.'],
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+  assert(
+    newSlip.status === 'REGISTERED' &&
+    newSlip.barcode.length === 44 &&
+    newSlip.digitableLine.replace(/\D/g, '').length === 47 &&
+    newSlip.bankCode === bankAcc.bankCode &&
+    newSlip.amount === 1500.0,
+    '50. Emissão de Boleto Bancário com Linha Digitável e Código de Barras FEBRABAN (PRD 09)'
+  );
+
+  // 51. Geração de Arquivo de Remessa CNAB 400 com Layout Padronizado (PRD 09)
+  const remessaCnab = dbEngine.generateCnabRemessa(
+    alfa.schemaNamespace,
+    {
+      bankAccountId: bankAcc.id,
+      bankSlipIds: [newSlip.id],
+      standard: 'CNAB400',
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+  const remessaLines = remessaCnab.contentRaw.split('\r\n');
+  assert(
+    remessaCnab.type === 'REMESSA' &&
+    remessaCnab.standard === 'CNAB400' &&
+    remessaCnab.status === 'GENERATED' &&
+    remessaCnab.itemsCount >= 1 &&
+    remessaLines[0].startsWith('01REMESSA') && // Header CNAB 400
+    remessaLines[remessaLines.length - 1].startsWith('9'), // Trailler CNAB 400
+    '51. Geração de Arquivo de Remessa CNAB 400 com Layout Padronizado (PRD 09)'
+  );
+
+  // 52. Processamento e Conciliação de Retorno CNAB com Baixa em Título a Receber (PRD 09)
+  const testRec = dbEngine.createAccountReceivable(
+    alfa.schemaNamespace,
+    {
+      customerId: petroPartner.id,
+      customerName: petroPartner.name,
+      customerDocument: petroPartner.document,
+      description: 'Duplicata para Liquidação via Retorno CNAB',
+      originalValue: 1500.0,
+      dueDate: '2026-10-30',
+      issueDate: '2026-09-21',
+    }
+  );
+  newSlip.accountReceivableId = testRec.id;
+
+  // Monta arquivo de retorno CNAB 400 simulando liquidação (Ocorrência 06)
+  let retHeader = '02RETORNO01COBRANCA       ';
+  retHeader = retHeader.padEnd(76, ' ') + (bankAcc.bankCode || '001');
+  retHeader = retHeader.padEnd(400, ' ');
+
+  let retDetail = '1' + ''.padEnd(36, ' ');
+  retDetail += newSlip.documentNumber.padEnd(10, ' '); // 37..46
+  retDetail = retDetail.padEnd(62, ' ');
+  retDetail += newSlip.ourNumber.replace(/\D/g, '').padEnd(11, ' '); // 62..72
+  retDetail = retDetail.padEnd(108, ' ');
+  retDetail += '06'; // 108..109 (Ocorrência 06 = Liquidação)
+  retDetail += '210926'; // 110..115 (Data de Pagamento DDMMAA)
+  retDetail += newSlip.documentNumber.padEnd(10, ' '); // 116..125
+  retDetail = retDetail.padEnd(152, ' ');
+  retDetail += '0000000150000'; // 152..164 (Valor Nominal)
+  retDetail = retDetail.padEnd(253, ' ');
+  retDetail += '0000000150000'; // 253..265 (Valor Pago)
+  retDetail = retDetail.padEnd(400, ' ');
+
+  let retTrailler = '9201001'.padEnd(400, ' ');
+  const rawRetorno = `${retHeader}\r\n${retDetail}\r\n${retTrailler}`;
+
+  const retornoResult = dbEngine.processCnabRetorno(
+    alfa.schemaNamespace,
+    {
+      contentRaw: rawRetorno,
+      bankAccountId: bankAcc.id,
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+  const updatedSlipAfterReturn = dbEngine.listBankSlips(alfa.schemaNamespace).find((s) => s.id === newSlip.id);
+  const updatedRecAfterReturn = (storageAlfa.accountsReceivable || []).find((r) => r.id === testRec.id);
+  assert(
+    retornoResult.cnabFile.type === 'RETORNO' &&
+    retornoResult.settledSlipsCount >= 1 &&
+    updatedSlipAfterReturn?.status === 'PAID' &&
+    updatedRecAfterReturn?.status === 'PAID',
+    '52. Processamento e Conciliação de Retorno CNAB com Baixa em Título a Receber (PRD 09)'
+  );
+
+  // 53. Cobrança Pix Dinâmico com Payload EMV Copia e Cola e QR Code SVG (PRD 09)
+  const pixCharge = dbEngine.createPixCharge(
+    alfa.schemaNamespace,
+    {
+      customerName: petroPartner.name,
+      customerDocument: petroPartner.document,
+      amount: 450.0,
+      description: 'Assinatura Mensal Enlace ERP',
+      keyType: 'CNPJ',
+      key: alfa.cnpj,
+      accountReceivableId: testRec.id,
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+  assert(
+    pixCharge.txid.length >= 10 &&
+    pixCharge.status === 'ACTIVE' &&
+    pixCharge.emvPayload.startsWith('000201') &&
+    pixCharge.qrCodeSvg.includes('<svg') &&
+    pixCharge.amount === 450.0,
+    '53. Cobrança Pix Dinâmico com Payload EMV Copia e Cola e QR Code SVG (PRD 09)'
+  );
+
+  // 54. Liquidação Instantânea via Simulador Bacen SPI com Crédito em Tesouraria (PRD 09)
+  const initialBalance = bankAcc.currentBalance;
+  const pixSimulation = dbEngine.simulatePixPayment(
+    alfa.schemaNamespace,
+    pixCharge.txid,
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+  const updatedPix = dbEngine.listPixCharges(alfa.schemaNamespace).find((p) => p.txid === pixCharge.txid);
+  const finalBalance = bankAcc.currentBalance;
+  assert(
+    pixSimulation.charge.status === 'CONCLUDED' &&
+    !!pixSimulation.charge.endToEndId &&
+    updatedPix?.status === 'CONCLUDED' &&
+    finalBalance === BoletoMath.roundBRL(initialBalance + 450.0),
+    '54. Liquidação Instantânea via Simulador Bacen SPI com Crédito em Tesouraria (PRD 09)'
+  );
+
+  // 55. Execução em Lote da Régua de Cobrança (Dunning Engine) e Trilha de Auditoria (PRD 09)
+  const dunningRule = dbEngine.createDunningRule(
+    alfa.schemaNamespace,
+    {
+      name: 'Cobrança Preventiva - 3 Dias Antes',
+      triggerDays: 3,
+      channel: 'EMAIL',
+      templateSubject: 'Aviso de Vencimento de Título',
+      templateBody: 'Olá {cliente}, seu boleto de R$ {valor} vence em breve.',
+      includePix: true,
+      includeBoleto: true,
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+  const dunningExecution = dbEngine.executeDunningRules(
+    alfa.schemaNamespace,
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+  const tenantAudits = dbEngine.listTenantAudits(alfa.schemaNamespace);
+  const hasDunningAudit = tenantAudits.some((a) => a.action === 'DUNNING_RULES_EXECUTE');
+  assert(
+    dunningRule.id.startsWith('dun-') &&
+    dunningRule.isActive === true &&
+    Array.isArray(dunningExecution.logs) &&
+    hasDunningAudit,
+    '55. Execução em Lote da Régua de Cobrança (Dunning Engine) e Trilha de Auditoria (PRD 09)'
   );
 
   console.log('\n================================================================');

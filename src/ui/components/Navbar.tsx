@@ -25,6 +25,11 @@ import {
   ShoppingCart,
   DollarSign,
   FolderTree,
+  Receipt,
+  Boxes,
+  Landmark,
+  Truck,
+  Banknote,
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -83,10 +88,10 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onTabChange, onSwitc
             <div className="flex items-center gap-2">
               <span className="text-base font-semibold tracking-tight text-white">ENLACE ERP</span>
               <span className="rounded bg-emerald-950 border border-emerald-800/70 px-1.5 py-0.2 text-[10px] font-bold text-emerald-400">
-                PRD 01 a 05
+                PRD 01 a 09
               </span>
             </div>
-            <p className="text-[11px] text-slate-400">Multi-Tenant • Comercial, Operações & Financeiro</p>
+            <p className="text-[11px] text-slate-400">Multi-Tenant • Comercial, Estoque, Fiscal, Compras & Cobrança Bancária</p>
           </div>
         </div>
 
@@ -196,7 +201,67 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onTabChange, onSwitc
           }`}
         >
           <DollarSign className="h-3.5 w-3.5" />
-          Financeiro & Tesouraria (PRD 05)
+          Financeiro & Tesouraria
+        </button>
+
+        <button
+          onClick={() => onTabChange('billing')}
+          className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap ${
+            currentTab === 'billing'
+              ? 'border-emerald-500 text-white font-semibold'
+              : 'border-transparent text-emerald-400/90 hover:text-emerald-300'
+          }`}
+        >
+          <Receipt className="h-3.5 w-3.5" />
+          Faturamento & Recorrência (PRD 05)
+        </button>
+
+        <button
+          onClick={() => onTabChange('inventory')}
+          className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap ${
+            currentTab === 'inventory'
+              ? 'border-emerald-500 text-white font-semibold'
+              : 'border-transparent text-amber-400/90 hover:text-amber-300'
+          }`}
+        >
+          <Boxes className="h-3.5 w-3.5" />
+          Estoque & WMS (PRD 06)
+        </button>
+
+        <button
+          onClick={() => onTabChange('fiscal')}
+          className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap ${
+            currentTab === 'fiscal'
+              ? 'border-emerald-500 text-white font-semibold'
+              : 'border-transparent text-purple-400/90 hover:text-purple-300'
+          }`}
+        >
+          <Landmark className="h-3.5 w-3.5" />
+          Fiscal & Tributário (PRD 07)
+        </button>
+
+        <button
+          onClick={() => onTabChange('procurement')}
+          className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap ${
+            currentTab === 'procurement'
+              ? 'border-emerald-500 text-white font-semibold'
+              : 'border-transparent text-cyan-400/90 hover:text-cyan-300'
+          }`}
+        >
+          <Truck className="h-3.5 w-3.5" />
+          Compras & Suprimentos (PRD 08)
+        </button>
+
+        <button
+          onClick={() => onTabChange('banking')}
+          className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap ${
+            currentTab === 'banking'
+              ? 'border-emerald-500 text-white font-semibold'
+              : 'border-transparent text-emerald-400/90 hover:text-emerald-300'
+          }`}
+        >
+          <Banknote className="h-3.5 w-3.5" />
+          Cobrança & Pix (PRD 09)
         </button>
 
         <button

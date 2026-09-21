@@ -29,6 +29,7 @@ import {
   MessageSquare,
   Building2,
   Filter,
+  Receipt,
 } from 'lucide-react';
 import {
   Product,
@@ -293,6 +294,34 @@ export const CommercialView: React.FC = () => {
       }
     } catch (err: unknown) {
       showFeedback(err instanceof Error ? err.message : 'Falha ao cancelar venda', 'error');
+    }
+  };
+
+  const handleGenerateBillingFromSale = async (saleId: string) => {
+    try {
+      const res = await apiFetch<{ number: string; total: number }>(`/api/v1/billing/from-sale/${saleId}`, {
+        method: 'POST',
+      });
+      if (res.success && res.data) {
+        showFeedback(`Faturamento gerado com sucesso: Documento ${res.data.number} (R$ ${res.data.total.toFixed(2)}) com título gerado em Contas a Receber!`);
+        loadCommercialData();
+      }
+    } catch (err: unknown) {
+      showFeedback(err instanceof Error ? err.message : 'Falha ao faturar pedido de venda', 'error');
+    }
+  };
+
+  const handleGenerateBillingFromOs = async (osId: string) => {
+    try {
+      const res = await apiFetch<{ number: string; total: number; competenceLabel: string }>(`/api/v1/billing/from-os/${osId}`, {
+        method: 'POST',
+      });
+      if (res.success && res.data) {
+        showFeedback(`Faturamento de OS gerado com sucesso: Documento ${res.data.number} (R$ ${res.data.total.toFixed(2)}) na competência fiscal ${res.data.competenceLabel}!`);
+        loadCommercialData();
+      }
+    } catch (err: unknown) {
+      showFeedback(err instanceof Error ? err.message : 'Falha ao faturar ordem de serviço', 'error');
     }
   };
 
@@ -1000,7 +1029,7 @@ export const CommercialView: React.FC = () => {
                             className="flex items-center gap-1 rounded bg-emerald-950 border border-emerald-800 px-2 py-1 text-[11px] font-medium text-emerald-300 hover:bg-emerald-900 transition-colors"
                           >
                             <CheckCircle className="h-3 w-3" />
-                            Confirmar Faturamento
+                            Confirmar Venda
                           </button>
                           <button
                             onClick={() => handleCancelSale(s.id)}
@@ -1010,6 +1039,17 @@ export const CommercialView: React.FC = () => {
                             Cancelar
                           </button>
                         </>
+                      )}
+
+                      {s.status === 'CONFIRMED' && (
+                        <button
+                          onClick={() => handleGenerateBillingFromSale(s.id)}
+                          className="flex items-center gap-1 rounded bg-emerald-950 border border-emerald-800 px-2 py-1 text-[11px] font-medium text-emerald-300 hover:bg-emerald-900 transition-colors"
+                          title="Gerar documento de faturamento fiscal e título em Contas a Receber (PRD 05)"
+                        >
+                          <Receipt className="h-3 w-3" />
+                          Faturar Venda (PRD 05)
+                        </button>
                       )}
 
                       <button
@@ -1201,6 +1241,17 @@ export const CommercialView: React.FC = () => {
                       <option value="COMPLETED">CONCLUÍDA</option>
                       <option value="CANCELED">CANCELADA</option>
                     </select>
+
+                    {os.status === 'COMPLETED' && (
+                      <button
+                        onClick={() => handleGenerateBillingFromOs(os.id)}
+                        className="flex items-center gap-1 rounded bg-emerald-950 border border-emerald-800 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-900 transition-colors"
+                        title="Gerar faturamento fiscal na competência MM/YYYY e título a receber (PRD 05)"
+                      >
+                        <Receipt className="h-3.5 w-3.5" />
+                        Faturar OS (PRD 05)
+                      </button>
+                    )}
 
                     <button
                       onClick={() => setSelectedOsForDetails(os)}
