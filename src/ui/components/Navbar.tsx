@@ -30,6 +30,8 @@ import {
   Landmark,
   Truck,
   Banknote,
+  HelpCircle,
+  Rocket,
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -358,6 +360,30 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onTabChange, onSwitc
         >
           <FileText className="h-3.5 w-3.5" />
           Auditoria
+        </button>
+
+        <button
+          onClick={() => onTabChange('help')}
+          className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap ${
+            currentTab === 'help'
+              ? 'border-emerald-500 text-white font-semibold'
+              : 'border-transparent text-emerald-400 hover:text-emerald-300'
+          }`}
+        >
+          <HelpCircle className="h-3.5 w-3.5" />
+          Ajuda & Suporte
+        </button>
+
+        <button
+          onClick={() => onTabChange('deploy')}
+          className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors whitespace-nowrap ${
+            currentTab === 'deploy'
+              ? 'border-indigo-500 text-white font-semibold'
+              : 'border-transparent text-indigo-400 hover:text-indigo-300'
+          }`}
+        >
+          <Rocket className="h-3.5 w-3.5" />
+          Deploy & SRE
         </button>
 
         <button

@@ -1,0 +1,54 @@
+version: '3.8'
+
+# =====================================================================
+# ENLACE ERP - DOCKER COMPOSE PARA PRODUÇÃO & HOMOLOGAÇÃO
+# Stack completa: Aplicação Web/API + PostgreSQL 16 com Schemas Multi-Tenant
+# =====================================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: enlace-erp-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DATABASE_URL=postgresql://enlace_user:enlace_secure_pass_2026@db:5432/enlace_erp
+      - JWT_SECRET=enlace_jwt_super_secure_production_secret_key_2026_change_me
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - enlace-network
+
+  db:
+    image: postgres:16-alpine
+    container_name: enlace-erp-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=enlace_user
+      - POSTGRES_PASSWORD=enlace_secure_pass_2026
+      - POSTGRES_DB=enlace_erp
+    ports:
+      - "5432:5432"
+    volumes:
+      - enlace-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U enlace_user -d enlace_erp"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - enlace-network
+
+volumes:
+  enlace-pgdata:
+    driver: local
+
+networks:
+  enlace-network:
+    driver: bridge

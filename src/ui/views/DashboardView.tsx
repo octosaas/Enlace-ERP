@@ -29,6 +29,8 @@ import {
   Landmark,
   Truck,
   Banknote,
+  HelpCircle,
+  Rocket,
 } from 'lucide-react';
 
 interface CompanyRecord {
@@ -367,8 +369,8 @@ export const DashboardView: React.FC<{ onNavigateTab: (tab: string) => void }> =
         </div>
       </div>
 
-      {/* Ações Rápidas de Segurança e Governança */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      {/* Ações Rápidas de Segurança, Governança, Ajuda e Deploy */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
         <div
           onClick={() => onNavigateTab('users')}
           className="p-4 bg-slate-900/80 border border-slate-800 rounded-xl hover:border-indigo-600/50 cursor-pointer transition flex items-center gap-3"
@@ -377,8 +379,8 @@ export const DashboardView: React.FC<{ onNavigateTab: (tab: string) => void }> =
             <Users className="w-5 h-5" />
           </div>
           <div>
-            <div className="font-semibold text-white text-sm">Membros e Convites</div>
-            <p className="text-xs text-slate-400">Convidar colaboradores ou alterar papéis</p>
+            <div className="font-semibold text-white text-sm">Membros & Convites</div>
+            <p className="text-xs text-slate-400">Convidar ou alterar papéis</p>
           </div>
         </div>
 
@@ -390,8 +392,8 @@ export const DashboardView: React.FC<{ onNavigateTab: (tab: string) => void }> =
             <ShieldCheck className="w-5 h-5" />
           </div>
           <div>
-            <div className="font-semibold text-white text-sm">Matriz RBAC Granular</div>
-            <p className="text-xs text-slate-400">Ver permissões por perfil institucional</p>
+            <div className="font-semibold text-white text-sm">Matriz RBAC</div>
+            <p className="text-xs text-slate-400">Permissões por perfil</p>
           </div>
         </div>
 
@@ -404,7 +406,33 @@ export const DashboardView: React.FC<{ onNavigateTab: (tab: string) => void }> =
           </div>
           <div>
             <div className="font-semibold text-white text-sm">Alarmes de Segurança</div>
-            <p className="text-xs text-slate-400">Trilha de eventos e detecções em tempo real</p>
+            <p className="text-xs text-slate-400">Trilha de incidentes</p>
+          </div>
+        </div>
+
+        <div
+          onClick={() => onNavigateTab('help')}
+          className="p-4 bg-slate-900/80 border border-slate-800 rounded-xl hover:border-emerald-500/50 cursor-pointer transition flex items-center gap-3"
+        >
+          <div className="p-2.5 bg-emerald-950 text-emerald-400 rounded-lg">
+            <HelpCircle className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="font-semibold text-white text-sm">Central de Ajuda</div>
+            <p className="text-xs text-slate-400">Manuais PRD 01 a 09 e FAQ</p>
+          </div>
+        </div>
+
+        <div
+          onClick={() => onNavigateTab('deploy')}
+          className="p-4 bg-slate-900/80 border border-slate-800 rounded-xl hover:border-indigo-500/50 cursor-pointer transition flex items-center gap-3"
+        >
+          <div className="p-2.5 bg-indigo-950 text-indigo-400 rounded-lg">
+            <Rocket className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="font-semibold text-white text-sm">Deploy & SRE</div>
+            <p className="text-xs text-slate-400">Docker, Cloud Run e Backup</p>
           </div>
         </div>
       </div>

@@ -26,6 +26,8 @@ import { InventoryView } from './ui/views/InventoryView.js';
 import { FiscalView } from './ui/views/FiscalView.js';
 import { ProcurementView } from './ui/views/ProcurementView.js';
 import { BankingView } from './ui/views/BankingView.js';
+import { HelpView } from './ui/views/HelpView.js';
+import { DeployView } from './ui/views/DeployView.js';
 import { ShieldCheck } from 'lucide-react';
 
 const AppContent: React.FC = () => {
@@ -97,12 +99,30 @@ const AppContent: React.FC = () => {
         {currentTab === 'security-test' && <SecurityTestView />}
         {currentTab === 'modules' && <ModulesView />}
         {currentTab === 'audit' && <AuditLogView />}
+        {currentTab === 'help' && <HelpView />}
+        {currentTab === 'deploy' && <DeployView />}
         {currentTab === 'settings' && <SettingsView />}
       </main>
 
       <footer className="border-t border-slate-800/80 bg-slate-950/80 py-4 text-center text-xs text-slate-500">
         <div className="mx-auto max-w-7xl px-4 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span>Enlace ERP • Arquitetura Multi-Tenant com Isolamento por CNPJ</span>
+          <div className="flex items-center gap-3">
+            <span>Enlace ERP • Arquitetura Multi-Tenant com Isolamento por CNPJ</span>
+            <span className="text-slate-700">•</span>
+            <button
+              onClick={() => setCurrentTab('help')}
+              className="text-emerald-400 hover:text-emerald-300 hover:underline transition-colors"
+            >
+              Central de Ajuda
+            </button>
+            <span className="text-slate-700">•</span>
+            <button
+              onClick={() => setCurrentTab('deploy')}
+              className="text-indigo-400 hover:text-indigo-300 hover:underline transition-colors"
+            >
+              Deploy & SRE
+            </button>
+          </div>
           <span className="font-mono text-[11px] text-slate-400">
             Fase Atual: PRD 01 a 09 (Multi-Tenant, Governança RBAC, Cadastros, Comercial, Financeiro, Faturamento, Estoque/WMS, Fiscal, Compras & Cobrança Bancária/Pix)
           </span>
