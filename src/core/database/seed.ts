@@ -13,6 +13,14 @@ export class DatabaseSeeder {
    * Executa o seed idempotente no PostgreSQL caso as tabelas estejam vazias
    */
   static async seed(): Promise<void> {
+    const isProduction = process.env.NODE_ENV === 'production';
+    if (isProduction) {
+      logger.info(
+        '[DatabaseSeeder] Ambiente de produção detectado (NODE_ENV=production). Dados demonstrativos com credenciais de teste não são criados. Produção inicia limpa.'
+      );
+      return;
+    }
+
     if (!PostgresService.isDbConnected()) {
       logger.info('[DatabaseSeeder] Conexão PostgreSQL inativa, pulando seed no banco físico.');
       return;

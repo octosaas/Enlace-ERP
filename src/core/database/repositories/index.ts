@@ -13,6 +13,10 @@ export * from './salesRepository.js';
 export * from './billingRepository.js';
 export * from './receivableRepository.js';
 export * from './auditRepository.js';
+export * from './inventoryRepository.js';
+export * from './fiscalRepository.js';
+export * from './procurementRepository.js';
+export * from './financialRepository.js';
 
 import { IUserRepository, PostgresUserRepository, InMemoryUserRepository } from './userRepository.js';
 import { ICompanyRepository, PostgresCompanyRepository, InMemoryCompanyRepository } from './companyRepository.js';
@@ -24,6 +28,10 @@ import { ISalesRepository, PostgresSalesRepository, InMemorySalesRepository } fr
 import { IBillingRepository, PostgresBillingRepository, InMemoryBillingRepository } from './billingRepository.js';
 import { IReceivableRepository, PostgresReceivableRepository, InMemoryReceivableRepository } from './receivableRepository.js';
 import { IAuditRepository, PostgresAuditRepository, InMemoryAuditRepository } from './auditRepository.js';
+import { IInventoryRepository, PostgresInventoryRepository, InMemoryInventoryRepository } from './inventoryRepository.js';
+import { IFiscalRepository, PostgresFiscalRepository, InMemoryFiscalRepository } from './fiscalRepository.js';
+import { IProcurementRepository, PostgresProcurementRepository, InMemoryProcurementRepository } from './procurementRepository.js';
+import { IFinancialRepository, PostgresFinancialRepository, InMemoryFinancialRepository } from './financialRepository.js';
 import { PostgresService } from '../postgres.js';
 import { logger } from '../../logger/index.js';
 
@@ -38,6 +46,10 @@ export interface AppRepositories {
   billing: IBillingRepository;
   receivables: IReceivableRepository;
   audit: IAuditRepository;
+  inventory: IInventoryRepository;
+  fiscal: IFiscalRepository;
+  procurement: IProcurementRepository;
+  financial: IFinancialRepository;
 }
 
 export class RepositoryManager {
@@ -82,13 +94,17 @@ export class RepositoryManager {
         billing: new PostgresBillingRepository(),
         receivables: new PostgresReceivableRepository(),
         audit: new PostgresAuditRepository(),
+        inventory: new PostgresInventoryRepository(),
+        fiscal: new PostgresFiscalRepository(),
+        procurement: new PostgresProcurementRepository(),
+        financial: new PostgresFinancialRepository(),
       };
       return this.repos;
     }
 
-    if (isProduction && process.env.ENFORCE_STRICT_PROD_DB === 'true') {
+    if (isProduction && process.env.ALLOW_IN_MEMORY_FOR_TESTS !== 'true') {
       const errorMsg =
-        '[FATAL] Tentativa de inicializar repositórios em memória em ambiente de produção (NODE_ENV=production com ENFORCE_STRICT_PROD_DB=true). Persistência PostgreSQL é obrigatória. Fail-closed ativado.';
+        '[FATAL] Tentativa de inicializar repositórios em memória em ambiente de produção (NODE_ENV=production). Persistência PostgreSQL é obrigatória. Fail-closed ativado.';
       logger.error(errorMsg);
       throw new Error(errorMsg);
     }
@@ -125,6 +141,23 @@ export class RepositoryManager {
       audit: new InMemoryAuditRepository(
         (cnpj) => maps.getTenantStorage(cnpj).auditLogs,
         maps.securityEvents
+      ),
+      inventory: new InMemoryInventoryRepository(
+        (cnpj) => maps.getTenantStorage(cnpj).warehouses || [],
+        (cnpj) => maps.getTenantStorage(cnpj).stockItems || [],
+        (cnpj) => maps.getTenantStorage(cnpj).stockMovements || []
+      ),
+      fiscal: new InMemoryFiscalRepository(
+        (cnpj) => maps.getTenantStorage(cnpj).fiscalDocuments || [],
+        (cnpj) => maps.getTenantStorage(cnpj).fiscalInutilizations || []
+      ),
+      procurement: new InMemoryProcurementRepository(
+        (cnpj) => maps.getTenantStorage(cnpj).purchaseRequisitions || [],
+        (cnpj) => maps.getTenantStorage(cnpj).purchaseOrders || []
+      ),
+      financial: new InMemoryFinancialRepository(
+        (cnpj) => maps.getTenantStorage(cnpj).accountsPayable || [],
+        (cnpj) => maps.getTenantStorage(cnpj).bankAccounts || []
       ),
     };
 
