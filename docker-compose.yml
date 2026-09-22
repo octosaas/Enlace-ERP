@@ -15,10 +15,11 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NODE_ENV=production
+      - NODE_ENV=${NODE_ENV:-production}
       - PORT=3000
-      - DATABASE_URL=postgresql://enlace_user:enlace_secure_pass_2026@db:5432/enlace_erp
-      - JWT_SECRET=enlace_jwt_super_secure_production_secret_key_2026_change_me
+      - DATABASE_URL=${DATABASE_URL:-postgresql://${POSTGRES_USER:-enlace_user}:${POSTGRES_PASSWORD:-enlace_dev_pass_2026}@db:5432/${POSTGRES_DB:-enlace_erp}}
+      - JWT_SECRET=${JWT_SECRET:-enlace_jwt_dev_secret_key_change_in_production}
+      - ENLACE_VAULT_KEY=${ENLACE_VAULT_KEY:-enlace_master_vault_key_dev_seed_2026_aes256}
     depends_on:
       db:
         condition: service_healthy
@@ -30,9 +31,9 @@ services:
     container_name: enlace-erp-db
     restart: unless-stopped
     environment:
-      - POSTGRES_USER=enlace_user
-      - POSTGRES_PASSWORD=enlace_secure_pass_2026
-      - POSTGRES_DB=enlace_erp
+      - POSTGRES_USER=${POSTGRES_USER:-enlace_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-enlace_dev_pass_2026}
+      - POSTGRES_DB=${POSTGRES_DB:-enlace_erp}
     ports:
       - "5432:5432"
     volumes:

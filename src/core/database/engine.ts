@@ -132,6 +132,7 @@ import { ProcurementMath, QuotationComparator, NFeXmlParser } from '../procureme
 import { BoletoMath, PixEngine, CnabEngine, SUPPORTED_BANKS } from '../banking/bankingEngine.js';
 import { CollectionEngine } from '../collection/collectionEngine.js';
 import { PaymentProviderRegistry } from '../collection/paymentProviderRegistry.js';
+import { PostgresService } from './postgres.js';
 
 export interface TenantStorage {
   settings: {
@@ -2654,6 +2655,26 @@ class DatabaseEngine {
 
     this.isInitialized = true;
     logger.info('[DatabaseEngine] Banco de dados inicializado com sucesso (PRD 01 & 02).');
+
+    // Inicialização da infraestrutura PostgreSQL & Schemas dedicados de Tenant (PRD 01 - Seção 5)
+    try {
+      const isPgConnected = await PostgresService.initialize();
+      if (isPgConnected) {
+        for (const company of this.companies.values()) {
+          await PostgresService.provisionTenantSchema(company.cleanCnpj);
+        }
+        logger.info('[DatabaseEngine] Conexão PostgreSQL ativa. Schemas isolados provisionados no banco de dados.');
+      }
+    } catch (err: any) {
+      logger.warn(`[DatabaseEngine] Aviso na sincronização PostgreSQL: ${err.message}`);
+    }
+  }
+
+  /**
+   * Retorna o status da conexão PostgreSQL e configuração do Drizzle ORM
+   */
+  getPostgresStatus() {
+    return PostgresService.getStatus();
   }
 
   // --- MÉTODOS DE USUÁRIOS E IDENTIDADE ---

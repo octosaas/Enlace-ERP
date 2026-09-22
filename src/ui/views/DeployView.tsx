@@ -99,8 +99,9 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - DATABASE_URL=postgresql://enlace:secretpassword@db:5432/enlace_erp
-      - JWT_SECRET=prod_enlace_secret_key_change_me_immediately_98765
+      - DATABASE_URL=\${DATABASE_URL}
+      - JWT_SECRET=\${JWT_SECRET}
+      - ENLACE_VAULT_KEY=\${ENLACE_VAULT_KEY}
     depends_on:
       db:
         condition: service_healthy
@@ -110,9 +111,9 @@ services:
     container_name: enlace-erp-db
     restart: always
     environment:
-      - POSTGRES_USER=enlace
-      - POSTGRES_PASSWORD=secretpassword
-      - POSTGRES_DB=enlace_erp
+      - POSTGRES_USER=\${POSTGRES_USER:-enlace}
+      - POSTGRES_PASSWORD=\${POSTGRES_PASSWORD}
+      - POSTGRES_DB=\${POSTGRES_DB:-enlace_erp}
     ports:
       - "5432:5432"
     volumes:
@@ -282,9 +283,29 @@ x-webhook-secret: <segredo_configurado_no_portal_do_gateway>
           <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3 flex items-start gap-2.5">
             <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
             <div>
-              <div className="font-semibold text-slate-200">60/60 Testes Automatizados</div>
+              <div className="font-semibold text-slate-200">66/66 Testes Automatizados</div>
               <div className="text-slate-400 text-[11px] mt-0.5">
-                Suíte de testes de isolamento e regras de negócio PRD 01 a 09 & P06 100% aprovada.
+                Suíte de testes de isolamento, persistência real, adapters e segurança PRD 01 a 09 100% aprovada.
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3 flex items-start gap-2.5">
+            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold text-slate-200">Persistência Real PostgreSQL + Drizzle</div>
+              <div className="text-slate-400 text-[11px] mt-0.5">
+                Pool de conexões com provisionamento dinâmico de schemas físicos por CNPJ e migrações DDL.
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3 flex items-start gap-2.5">
+            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold text-slate-200">Guardrails da MaIA & Adapters Fiscais</div>
+              <div className="text-slate-400 text-[11px] mt-0.5">
+                Proteção anti-prompt injection, delegação RBAC estrita e desacoplamento Sandbox vs Focus NFe.
               </div>
             </div>
           </div>

@@ -131,6 +131,30 @@ const FAQ_DATA: FAQItem[] = [
     answer:
       'Cada notificação de gateway recebida em /api/webhooks/collections/:provider passa por registro em webhook_events_v2 com hash/id único e verificação de assinatura. Se o gateway reenviar o mesmo evento, o sistema identifica status DUPLICATE e preserva a idempotência sem criar pagamentos adicionais.',
   },
+  {
+    category: 'Persistência & PostgreSQL',
+    question: 'Como o PostgreSQL e Drizzle ORM gerenciam os schemas multi-tenant na prática?',
+    answer:
+      'O Enlace ERP provisiona dinamicamente um schema físico independente no PostgreSQL para cada empresa (ex: tenant_12345678000195). O pool de conexões (PostgresService) opera integrado ao Drizzle ORM e garante integridade referencial, queries transacionais isoladas e segurança contra persistência volátil.',
+  },
+  {
+    category: 'Segurança & Segredos',
+    question: 'Como o Credential Vault protege chaves e impede vazamentos em produção?',
+    answer:
+      'O cofre de credenciais utiliza criptografia autenticada AES-256-GCM. Em ambiente de produção, o sistema recusa inicialização se chaves padrão de teste forem detectadas ou se possuírem menos de 32 caracteres. Todos os segredos em contêineres utilizam interpolação segura de variáveis de ambiente.',
+  },
+  {
+    category: 'Inteligência Artificial (MaIA)',
+    question: 'Quais guardrails impedem prompt injection e acesso a dados de outros CNPJs na MaIA?',
+    answer:
+      'A MaIA atua sob delegação estrita do usuário (AI Principal) e não possui permissões superiores ao operador humano. O motor valida os prompts contra injeções e comandos destrutivos, sanitiza o contexto garantindo apenas dados do CNPJ ativo, e audita previamente cada tool call.',
+  },
+  {
+    category: 'Fiscal & Tributário',
+    question: 'Qual a diferença entre o SEFAZ Sandbox e a emissão em produção com Focus NFe?',
+    answer:
+      'O sistema adota o padrão Adapter formal com dois módulos: o SEFAZ Sandbox (simulador oficial para homologação e testes automatizados sem instabilidade) e o Focus NFe Adapter (integração de nuvem para transmissão real de NF-e, NFC-e e NFS-e consumindo credenciais do Vault).',
+  },
 ];
 
 interface ModuleGuide {

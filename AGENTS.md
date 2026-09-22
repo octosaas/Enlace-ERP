@@ -1,7 +1,7 @@
 # AGENTS.md — Diretrizes e Convenções para Agentes Autônomos de IA e Engenheiros
 
 > **Enlace ERP** • Plataforma ERP SaaS Multi-Tenant com Isolamento Estrito por CNPJ  
-> Versão Atual: **0.1.2 (PRD 01 ao PRD 09, PRD PARTE 06 & Spotlight Search Homologados)**  
+> Versão Atual: **0.1.3 (Auditoria Profunda: Persistência PostgreSQL Real com Drizzle ORM, Hardening de Segredos, Adapters Fiscais/Bancários e Guardrails da MaIA)**  
 > Última Atualização: **Setembro de 2026**
 
 ---
@@ -10,14 +10,14 @@
 
 O **Enlace ERP** é uma plataforma horizontal de gestão empresarial (ERP) projetada para alta segurança, confiabilidade fiscal brasileira e isolamento absoluto de dados entre múltiplos clientes corporativos (tenants).
 
-### Princípio Absoluto: Isolamento de Dados por Schema (`tenant_<CNPJ>`)
+### Princípio Absoluto: Isolamento de Dados por Schema Físico (`tenant_<CNPJ>`)
 1. **Separação Fisiológica de Dados**: Cada empresa contratante cadastrada opera em seu próprio Schema no banco de dados PostgreSQL (ex: `tenant_12345678000195`, `tenant_98765432000110`).
 2. **Proibição de Coluna `tenant_id` no Data Plane**: É **estritamente proibido** consolidar dados transacionais de múltiplos CNPJs em tabelas compartilhadas usando filtros WHERE `tenant_id = ?`. Cada schema contém suas próprias tabelas físicas independentes.
 3. **Prevenção Anti-IDOR e Anti-Vazamento**: Nenhuma rota ou método do Data Plane pode permitir acesso a dados de outro schema. A validação de pertinência do usuário ao CNPJ (`activeMembership`) deve ocorrer antes de qualquer operação no banco.
 
 ---
 
-## 2. Arquitetura em Dois Planos
+## 2. Arquitetura em Dois Planos e Persistência Real (PostgreSQL + Drizzle ORM)
 
 ```
                           ┌────────────────────────┐
@@ -35,20 +35,35 @@ O **Enlace ERP** é uma plataforma horizontal de gestão empresarial (ERP) proje
             ▼                                                   ▼
 ┌───────────────────────────────┐               ┌───────────────────────────────┐
 │     CONTROL PLANE (Global)    │               │      DATA PLANE (Por CNPJ)    │
+│       (Schema: public)        │               │  (Schemas: tenant_<CNPJ_X>)   │
 ├───────────────────────────────┤               ├───────────────────────────────┤
-│ • Users (Identidades Globais) │               │ • Schema: tenant_<CNPJ_A>     │
-│ • Companies (CNPJs Cadastros) │               │   - Produtos, Estoque (CMP)   │
-│ • Memberships & RBAC Roles    │               │   - Vendas, Orçamentos, OS    │
-│ • Active User Sessions        │               │   - Contas a Receber/Pagar    │
-│ • Refresh Tokens Anti-Theft   │               │   - NF-e, Protocolos SEFAZ    │
-│ • Security Events / Alarmes   │               │   - Boletos, Remessa/Retorno  │
-└───────────────────────────────┘               │ • Schema: tenant_<CNPJ_B>...  │
-                                                └───────────────────────────────┘
+│ • cp_users (Identidades)      │               │ • company_settings, audit_logs│
+│ • cp_companies (CNPJs)        │               │ • partners, products, cmp     │
+│ • cp_memberships & RBAC Roles │               │ • sales, quotes, service_orders│
+│ • cp_sessions (Ativas)        │               │ • receivables_v2, collections │
+│ • cp_refresh_tokens Anti-Theft│               │ • payments_v2, payment_provs  │
+│ • cp_security_events          │               │ • webhook_events_v2, accounts │
+└───────────────────────────────┘               └───────────────────────────────┘
 ```
+
+### Arquitetura de Persistência Real:
+- **Drizzle ORM & Driver Node-Postgres**: O arquivo `src/core/database/schema.ts` define rigorosamente as entidades do Control Plane e do Data Plane multi-tenant com tipagem estrita e integridade referencial.
+- **PostgresService (`src/core/database/postgres.ts`)**: Gerencia o pool de conexões PostgreSQL (`pg.Pool`), provê verificação contínua de status via `getStatus()` e executa o provisionamento dinâmico de schemas de CNPJ com DDL automatizado (`CREATE SCHEMA IF NOT EXISTS "tenant_<CNPJ>"`).
+- **Fallback Gracioso para Homologação/Testes**: Quando a variável `DATABASE_URL` não está configurada no ambiente de CI/CD ou testes isolados, o motor opera com repositórios em memória de alta fidelidade espelhando exatamente os mesmos contratos e isolamento de schemas, emitindo alerta estruturado via logger.
 
 ---
 
-## 3. Matriz de Governança RBAC e Regras de Segurança (PRD 02)
+## 3. Gestão Segura de Segredos e Hardening de Produção
+
+### Diretrizes de Segurança Invioláveis:
+1. **Zero Hardcoded Secrets**: Nenhum segredo ou chave criptográfica real reside no código-fonte.
+2. **Cofre de Credenciais (`CredentialVault`)**: Criptografia autenticada AES-256-GCM. Em ambiente `NODE_ENV=production`, o cofre rejeita obrigatoriamente a inicialização caso `ENLACE_VAULT_KEY` seja omitida, vazia ou utilize chaves de desenvolvimento. A chave DEVE possuir no mínimo 32 caracteres criptograficamente fortes.
+3. **Serviço de Autenticação (`AuthService`)**: Assinatura e verificação de tokens JWT. Em ambiente `NODE_ENV=production`, o serviço bloqueia imediatamente caso `JWT_SECRET` utilize o padrão de teste ou possua menos de 32 caracteres.
+4. **Artefatos de Deploy Parametrizados**: O arquivo `docker-compose.yml` e o módulo de deploy na interface utilizam interpolação segura `${JWT_SECRET:-...}` e `${ENLACE_VAULT_KEY:-...}`, sem expor senhas fixas de produção.
+
+---
+
+## 4. Matriz de Governança RBAC e Regras da IA MaIA (PRD 02)
 
 O sistema implementa 5 papéis corporativos padronizados:
 
@@ -60,61 +75,45 @@ O sistema implementa 5 papéis corporativos padronizados:
 | `operator` | Operador do Dia a Dia | Lançamentos de estoque, pedidos, ordens de serviço e emissões diárias. |
 | `viewer` | Auditor / Somente Leitura | Consulta irrestrita a relatórios e trilha de auditoria; sem privilégios de escrita. |
 
-### Regras do Agente de Inteligência Artificial (MaIA):
-- A MaIA atua como **AI Principal** sob delegação do usuário logado.
-- Ela herda estritamente o `activeMembership` e as permissões do usuário em sessão.
-- É **proibido** qualquer bypass de autorização ou execução de ações restritas quando o operador não possuir o perfil necessário.
+### Regras e Guardrails do Agente de IA (MaIA):
+1. **AI Principal Delegada**: A MaIA atua exclusivamente sob delegação do usuário logado e herda seu `activeMembership`.
+2. **Impossibilidade de Bypass**: É **estritamente proibido** qualquer bypass de autorização. O método `AIPrincipalManager.assertPermission` é invocado antes de qualquer tool call.
+3. **Guardrails contra Prompt Injection**: O método `validatePromptSafety` analisa comandos em busca de jailbreaks, tentativas de revelação de system prompt, comandos destrutivos (`drop table`) ou injeção de schemas de terceiros, gerando alertas com severidade `HIGH` no `AuditService`.
+4. **Isolamento de Contexto**: O método `filterContextForActiveTenant` garante que a MaIA receba unicamente informações pertencentes ao schema do CNPJ ativo.
 
 ---
 
-## 4. Regras Matemáticas e de Negócio por Módulo
+## 5. Regras Matemáticas e de Negócio por Módulo
 
 ### A. Comercial & Faturamento (PRD 04 & 05)
-- Todos os cálculos monetários devem utilizar `BoletoMath.roundBRL` ou método equivalente de duas casas decimais com arredondamento padrão `Math.round((val + Number.EPSILON) * 100) / 100`.
-- É expressamente proibido expor números com dízimas flutuantes na interface ou nos registros contábeis.
+- Todos os cálculos monetários devem utilizar `BoletoMath.roundBRL` com arredondamento padrão `Math.round((val + Number.EPSILON) * 100) / 100`.
 - Conversão de Orçamento para Venda requer **chave de idempotência** para impedir duplicidade de faturamento.
 
 ### B. Estoque & Almoxarifados WMS (PRD 06)
 - **Recálculo Contínuo de CMP**:
   $$\text{Novo CMP} = \frac{(\text{Saldo Anterior} \times \text{CMP Anterior}) + (\text{Qtd Entrada} \times \text{Custo Unitário Entrada})}{\text{Saldo Anterior} + \text{Qtd Entrada}}$$
-- **Trava de Saldo Negativo**: Saídas de mercadorias que resultem em saldo negativo devem ser barradas com erro operacional explícito.
+- **Trava de Saldo Negativo**: Saídas de mercadorias que resultem em saldo negativo são bloqueadas.
 
-### C. Fiscal & NF-e (PRD 07)
-- Layout da NF-e segue o padrão oficial da SEFAZ v4.00 (Modelo 55).
-- Notas autorizadas possuem **XML imutável** assinado digitalmente com certificado A1 via padrão XMLDSig.
-- Inutilização de faixa fiscal exige justificativa mínima de 15 caracteres.
+### C. Fiscal & NF-e (PRD 07 - Adapters Desacoplados)
+- **Contrato Formal `FiscalProvider` (`src/core/fiscal/fiscalProvider.interface.ts`)**:
+  - `SefazSandboxAdapter`: Simulador homologado para ambiente de testes e contingência local sem dependência de indisponibilidade da SEFAZ.
+  - `FocusNFeAdapter`: Integração de nuvem para produção e homologação via Focus NFe API v2, com autenticação segura via CredentialVault e fallback auditado.
+  - `FiscalProviderRegistry`: Fábrica desacoplada que resolve o adapter correto por configuração de tenant.
 
-### D. Compras & 3-Way Matching (PRD 08)
-- Requisições de compra acima de R$ 5.000,00 exigem aprovação de Gestor ou Administrador.
-- Entrada de mercadorias via XML exige conferência tripartite: Pedido de Compra $\times$ XML da NF-e $\times$ Recebimento Físico no Depósito.
-
-### E. Cobrança Bancária & Pix (PRD 09)
-- Código de barras FEBRABAN: 44 dígitos numéricos com Módulo 11 (fator 2 a 9).
-- Linha digitável: 47 dígitos organizados em 3 campos com Módulo 10 + DV geral Módulo 11 + Fator de Vencimento e Valor.
-- Arquivos de Remessa e Retorno CNAB 400 em formato posicional com registros Header, Detalhe (Segmentos) e Trailer.
-- Pix Dinâmico: Payload EMV "Copia e Cola" iniciando em `000201`, cálculo de CRC16-CCITT (`6304XXXX`) e QR Code vetorial SVG.
-
-### F. Cobrança & Contas a Receber (PRD PARTE 06)
-- **Desacoplamento Fisiológico**: O Título a Receber (`Receivable`) representa o direito creditório contratual. A Cobrança (`Collection`) representa o meio efêmero de liquidação. 1 Título pode ter N cobranças sucessivas (Boleto, Pix, Cartão) sem alterar a identidade do contrato.
-- **Motor de Encargos Moratórios & Descontos**:
-  $$\text{Juros Diários} = \text{Valor Original} \times \left(\frac{\text{Taxa Mensal}}{30 \times 100}\right) \times \text{Dias de Atraso}$$
-  $$\text{Multa} = \text{Valor Original} \times \left(\frac{\text{Percentual Multa}}{100}\right) + \text{Multa Fixa}$$
-  - Desconto pontual com trava estrita de data limite: se data atual $\le$ data limite, abate o desconto concedido.
-- **Multi-Gateway Plugável**: Padrão Adapter com suporte a múltiplos provedores (Asaas, C6 Bank, Cora, Enlace Sandbox). Chaves e credenciais criptografadas e isoladas por schema de CNPJ (`payment_providers_v2`).
-- **Webhook Idempotente com Baixa Automática**:
-  - Deduplicação estrita via assinatura / hash de evento (`webhook_events_v2`).
-  - O reenvio do mesmo webhook resulta em `DUPLICATE` sem gerar pagamentos ou baixas duplicadas.
-  - Baixa automática reconcilia a cobrança (`PAID`), liquida o recebível (`PAID`) e gera o registro financeiro de tesouraria (`payments_v2`).
+### D. Cobrança Bancária, Pix & Gateways (PRD 09 & PARTE 06)
+- **Desacoplamento Fisiológico**: O Título a Receber (`Receivable`) representa o direito creditório contratual. A Cobrança (`Collection`) representa o meio efêmero de liquidação.
+- **Multi-Gateway Plugável**: Padrão Adapter com suporte a múltiplos provedores (`AsaasAdapter`, `C6BankAdapter`, `CoraAdapter`, `EnlaceSandboxAdapter`).
+- **Webhook Idempotente**: Deduplicação estrita via assinatura/hash de evento (`webhook_events_v2`), conciliando pagamentos e efetuando baixa automática em tempo real.
 
 ---
 
-## 5. Protocolo de Verificação e Testes Obrigatório
+## 6. Protocolo de Verificação e Testes Obrigatório
 
-O repositório possui uma suíte completa de **60 testes automatizados de ponta a ponta** localizada em `tests/isolation.test.ts`.
+O repositório possui uma suíte completa de **66 testes automatizados de ponta a ponta** localizada em `tests/isolation.test.ts`.
 
 ### Comandos de Validação:
 ```bash
-# Executar a bateria de testes completa (60/60 testes devem passar)
+# Executar a bateria de testes completa (66/66 testes devem passar)
 npm test
 # ou: npx tsx tests/isolation.test.ts
 
@@ -125,16 +124,7 @@ npm run lint
 npm run build
 ```
 
-> ⚠️ **REGRA DE OURO**: Qualquer modificação no código-fonte DEVE manter todos os 60 testes verdes. Não altere os testes para mascarar quebras de contrato de negócio.
-
----
-
-## 6. Padrões de Interface (UI/UX) & Tailwind CSS
-
-- **Paleta de Cores**: Base em `slate-950` para plano de fundo, `slate-900` para superfícies de cartões e contêineres, `slate-800` para bordas de alta definição, `emerald-400`/`emerald-500` para ações de sucesso/primárias e `rose-400` para erros ou revogações.
-- **Proibição de AI Slop**: Não crie gradientes roxos extravagantes, botões sem ação vinculada, sombras difusas não-funcionais ou layouts genéricos sem alinhamento de alta densidade corporativa.
-- **Tipografia**: Legibilidade de relatórios corporativos com suporte a formatação monetária padrão brasileiro (`pt-BR`, `R$ 1.250,00`).
-- **Ícones**: Utilizar exclusivamente ícones da biblioteca `lucide-react`.
+> ⚠️ **REGRA DE OURO**: Qualquer modificação no código-fonte DEVE manter todos os 66 testes verdes. Não altere os testes para mascarar quebras de contrato de negócio.
 
 ---
 
@@ -142,7 +132,7 @@ npm run build
 
 - A aplicação DEVE rodar obrigatoriamente na porta **3000** vinculada a `0.0.0.0`.
 - O servidor Express orquestra tanto os endpoints de API `/api/*` quanto o serving dos assets estáticos via Vite middleware em desenvolvimento e `dist/index.html` em produção.
-- **Ingestão de Webhooks de Pagamento**: Endpoint centralizado `/api/webhooks/collections/:provider` recebendo notificações assíncronas dos gateways (Asaas, C6, Cora, Enlace Sandbox) com verificação de assinatura e idempotência nativa por tenant.
+- **Ingestão de Webhooks de Pagamento**: Endpoint centralizado `/api/webhooks/collections/:provider` recebendo notificações assíncronas dos gateways com verificação de assinatura e idempotência nativa por tenant.
 - Artefatos de deploy disponíveis: `Dockerfile` (multi-stage) e `docker-compose.yml`.
 
 ---
@@ -150,21 +140,19 @@ npm run build
 ## 8. Busca Rápida Spotlight & Paleta de Comandos (`Cmd+K` / `Ctrl+K`)
 
 - **Acessibilidade Universal**: Acionável via atalho global de teclado (`⌘K` no macOS e `Ctrl+K` no Windows/Linux) ou por botões dedicados na barra de navegação superior (`Navbar`) e rodapé.
-- **Navegação 100% por Teclado**: Suporte completo a navegação por setas (`↑` e `↓`) com foco visual, seleção por `Enter` e cancelamento por `Esc`.
 - **Isolamento Estrito na Busca**:
   - Endpoint: `GET /api/v1/search?q=<termo>&limit=30` protegido por `authMiddleware` e `tenantMiddleware`.
   - A varredura consulta **exclusivamente o schema da empresa ativa** (`tenant_<CNPJ>`).
-  - Cobertura de entidades: Parceiros (Clientes/Fornecedores), Estoque/Produtos, Vendas, Orçamentos, Ordens de Serviço, Contratos Recorrentes, Títulos a Receber/Pagar, Notas Fiscais (NF-e Modelo 55), Compras, Boletos e Cobranças Pix.
-  - Normalização inteligente: busca por CNPJ/CPF pontuado ou apenas numérico sem pontuação.
+  - Cobertura de entidades: Parceiros, Estoque, Vendas, Orçamentos, Ordens de Serviço, Contratos, Títulos, NF-e, Compras, Boletos e Cobranças Pix.
 
 ---
 
 ## 9. Checklist de Homologação e Critérios de Aceite
 
 Para submissão a ambientes de Staging ou Produção:
-1. `npm test` aprovando **60/60 testes** sem exceções.
+1. `npm test` aprovando **66/66 testes** sem exceções.
 2. `npm run lint` retornando **0 erros de tipagem estrita**.
 3. `npm run build` gerando bundle `dist/` e `dist/server.cjs` com sourcemaps.
 4. Isolamento comprovado por teste IDOR: nenhuma rota responde a dados de schema divergente do `activeMembership`.
 5. Imunidade institucional do Owner incondicionalmente preservada.
-
+6. Credenciais de produção protegidas com rejeição imediata de chaves inseguras.

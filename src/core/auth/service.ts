@@ -12,7 +12,24 @@ import { User, Company, Membership, UserSession, RefreshToken } from '../../shar
 import { TotpService } from '../security/totp.js';
 import { AuditService } from '../audit/service.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'enlace_erp_secure_development_secret_key_2026_change_in_prod';
+const DEV_DEFAULT_JWT_SECRET = 'enlace_erp_secure_development_secret_key_2026_change_in_prod';
+
+function getJwtSecret(): string {
+  const envSecret = process.env.JWT_SECRET;
+  const isProduction = process.env.NODE_ENV === 'production';
+
+  if (isProduction) {
+    if (!envSecret || envSecret === DEV_DEFAULT_JWT_SECRET || envSecret.trim().length < 32) {
+      throw new Error(
+        'FALHA DE SEGURANÇA CRÍTICA: A variável de ambiente JWT_SECRET é obrigatória em produção e deve conter no mínimo 32 caracteres criptograficamente seguros.'
+      );
+    }
+    return envSecret;
+  }
+
+  return envSecret || DEV_DEFAULT_JWT_SECRET;
+}
+
 const ACCESS_TOKEN_EXPIRATION = '1h'; // 1 hora de vida para o access token (PRD 02)
 const REFRESH_TOKEN_DAYS = 7; // 7 dias de validade para o refresh token com rotação
 
@@ -155,7 +172,7 @@ export class AuthService {
       activeCompanyId: companies[0]?.company.id,
     };
 
-    const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRATION });
+    const token = jwt.sign(tokenPayload, getJwtSecret(), { expiresIn: ACCESS_TOKEN_EXPIRATION });
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
     const refreshTokenPlain = `rt-${crypto.randomBytes(32).toString('hex')}`;
@@ -210,7 +227,7 @@ export class AuthService {
    */
   static verifyToken(token: string): AuthSessionPayload {
     try {
-      const decoded = jwt.verify(token, JWT_SECRET) as AuthSessionPayload;
+      const decoded = jwt.verify(token, getJwtSecret()) as AuthSessionPayload;
 
       // Valida se o usuário não foi desativado ou suspenso em tempo real
       const user = dbEngine.getUserById(decoded.userId);
@@ -317,7 +334,7 @@ export class AuthService {
         sessionId: session.id,
         activeCompanyId: session.activeCompanyId,
       },
-      JWT_SECRET,
+      getJwtSecret(),
       { expiresIn: ACCESS_TOKEN_EXPIRATION }
     );
 

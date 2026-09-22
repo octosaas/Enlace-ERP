@@ -126,7 +126,8 @@ export type SecurityEventType =
   | 'SECURITY_CROSS_INSTANCE_ATTEMPT'
   | 'SECURITY_MFA_FAILED'
   | 'SECURITY_TOKEN_REUSE_DETECTED'
-  | 'SECURITY_ACCOUNT_LOCKED';
+  | 'SECURITY_ACCOUNT_LOCKED'
+  | 'SECURITY_INJECTION_ATTEMPT';
 
 export interface SecurityEvent {
   id: string;
