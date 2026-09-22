@@ -869,6 +869,7 @@ app.get(
       { code: 'fiscal', name: 'Módulo Fiscal', isCore: false, description: 'Sped, NF-e, NFS-e e regras tributárias' },
       { code: 'purchases', name: 'Compras & Suprimentos', isCore: false, description: 'Requisições, cotações comparativas, pedidos de compra e importação XML de NF-e' },
       { code: 'banking', name: 'Cobrança Bancária & Pix', isCore: false, description: 'Boletos bancários com código de barras, Pix dinâmico com QR Code, arquivos CNAB 240/400 e régua de cobrança' },
+      { code: 'collections', name: 'Cobrança & Recebíveis V2', isCore: false, description: 'Desacoplamento de títulos e cobranças, múltiplos gateways (Asaas, C6, Cora) e webhooks idempotentes (PRD PARTE 06)' },
     ];
 
     const modulesWithStatus = allModules.map((m) => ({

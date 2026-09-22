@@ -54,6 +54,12 @@ const FAQ_DATA: FAQItem[] = [
       'Clique no botão "Trocar CNPJ" na barra superior (Navbar) ao lado da identificação da empresa ativa. O sistema exibirá o seletor corporativo validando a permissão do seu usuário para o CNPJ selecionado.',
   },
   {
+    category: 'Navegação & Produtividade',
+    question: 'Como utilizar a Busca Rápida Spotlight e Paleta de Comandos (Cmd+K / Ctrl+K)?',
+    answer:
+      'Pressione Cmd+K (no macOS) ou Ctrl+K (no Windows/Linux), ou clique na barra de busca rápida no topo da tela. A paleta permite alternar instantaneamente entre qualquer módulo do sistema, acionar ações rápidas (novo pedido, novo título, emissão de boleto) e buscar em tempo real por clientes, fornecedores, pedidos, ordens de serviço, notas fiscais (NF-e), contratos, boletos e títulos financeiros isolados no schema da empresa ativa.',
+  },
+  {
     category: 'Identidade & Segurança',
     question: 'Como ativar e configurar o Segundo Fator de Autenticação (MFA)?',
     answer:
@@ -311,6 +317,46 @@ const MODULE_GUIDES: ModuleGuide[] = [
       '1. Vendas e contratos geram Títulos a Receber (Receivables) no schema do CNPJ.',
       '2. O operador ou rotina emite Cobrança (Collection) via gateway configurado (Boleto/Pix).',
       '3. O gateway processa o pagamento e envia webhook assinado com baixa automática e idempotente.',
+    ],
+  },
+  {
+    id: 'spotlight_search',
+    title: 'Busca Rápida Spotlight & Paleta (Cmd+K)',
+    prd: 'UX & Produtividade',
+    icon: <Search className="h-5 w-5 text-indigo-400" />,
+    summary:
+      'Paleta de comandos e mecanismo de busca universal com isolamento estrito de schema. Permite navegação rápida por teclado entre qualquer módulo e localização instantânea de cadastros, vendas, ordens de serviço, notas fiscais, contratos e cobranças bancárias.',
+    keyFeatures: [
+      'Atalho universal Cmd+K (macOS) ou Ctrl+K (Windows/Linux)',
+      'Navegação acessível via setas, Enter e Esc com rolagem automática',
+      'Varredura multi-entidade dentro do schema do CNPJ ativo via /api/v1/search',
+      'Normalização de termos e remoção de pontuação de CPF/CNPJ',
+      'Ações rápidas contextuais e filtros temáticos por abas',
+    ],
+    workflow: [
+      '1. Pressione Cmd+K ou Ctrl+K ou clique no atalho de busca da Navbar.',
+      '2. Digite termos de busca (nome, razão social, número de pedido, NF-e ou documento).',
+      '3. Pressione Enter para abrir diretamente o registro no módulo correspondente.',
+    ],
+  },
+  {
+    id: 'homologation_sre',
+    title: 'Homologação, Testes E2E & DevOps',
+    prd: 'Qualidade & CI/CD',
+    icon: <Terminal className="h-5 w-5 text-emerald-400" />,
+    summary:
+      'Diretrizes de qualidade de software, critérios de aceitação e procedimentos de homologação contínua. Abrange a execução da suíte de 60 testes automatizados, validação de tipagem TypeScript estrita e monitoramento de saúde.',
+    keyFeatures: [
+      'Suíte de 60 testes automatizados de ponta a ponta (tests/isolation.test.ts)',
+      'Validação de isolamento de schemas, proteção IDOR e regras de negócio fiscais/bancárias',
+      'Verificação estática de tipagem (tsc --noEmit) sem erros permitidos',
+      'Build standalone CJS em dist/server.cjs com suporte a sourcemaps',
+      'Monitoramento de saúde via /api/health e webhooks idempotentes',
+    ],
+    workflow: [
+      '1. Execute "npm test" para validar que todos os 60 testes de isolamento passam.',
+      '2. Execute "npm run lint" para garantir tipagem 100% estrita sem exceções.',
+      '3. Execute "npm run build" para validar o empacotamento completo de produção.',
     ],
   },
 ];

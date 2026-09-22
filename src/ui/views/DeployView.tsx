@@ -21,6 +21,9 @@ import {
   Download,
   ExternalLink,
   Code2,
+  Search,
+  CheckCheck,
+  Play,
 } from 'lucide-react';
 
 export const DeployView: React.FC = () => {
@@ -154,6 +157,19 @@ pg_restore -h localhost -U enlace -d enlace_erp \\
   --clean --if-exists \\
   --schema=${activeSchema} \\
   backup_${activeSchema}_20260921.dump`;
+
+  const CICD_PIPELINE_SNIPPET = `# 1. Executar bateria de testes automatizados E2E (60/60 Obrigatório)
+npm test
+# ou: npx tsx tests/isolation.test.ts
+
+# 2. Verificação estática de tipos TypeScript (zero erros aceitos)
+npm run lint
+
+# 3. Compilação de Produção (Vite SPA + esbuild dist/server.cjs)
+npm run build
+
+# 4. Inicialização do servidor em modo produção
+npm start`;
 
   const WEBHOOK_CONFIG_SNIPPET = `# 1. URL do Endpoint de Ingestão de Webhooks
 # Rota pública acessível pelos Gateways (Asaas, C6, Cora, Enlace Sandbox):
@@ -289,6 +305,26 @@ x-webhook-secret: <segredo_configurado_no_portal_do_gateway>
               <div className="font-semibold text-slate-200">Webhooks de Pagamento Idempotentes</div>
               <div className="text-slate-400 text-[11px] mt-0.5">
                 Ingestão /api/webhooks/collections/:provider com deduplicação e liquidação automática.
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3 flex items-start gap-2.5">
+            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold text-slate-200">Busca Spotlight & Paleta (Cmd+K)</div>
+              <div className="text-slate-400 text-[11px] mt-0.5">
+                Endpoint /api/v1/search com latência &lt;30ms e isolamento estrito de schema.
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3 flex items-start gap-2.5">
+            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold text-slate-200">Imunidade Institucional do Owner</div>
+              <div className="text-slate-400 text-[11px] mt-0.5">
+                Blindagem contra exclusão, rebaixamento ou suspensão do proprietário titular.
               </div>
             </div>
           </div>
@@ -459,6 +495,67 @@ x-webhook-secret: <segredo_configurado_no_portal_do_gateway>
         <pre className="rounded-lg border border-slate-800 bg-slate-950 p-3 font-mono text-[11px] text-slate-300 overflow-x-auto leading-relaxed">
           {WEBHOOK_CONFIG_SNIPPET}
         </pre>
+      </div>
+
+      {/* Seção de Homologação, Pipeline CI/CD & Quality Gate */}
+      <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5 space-y-4">
+        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+          <div className="flex items-center gap-2">
+            <CheckCheck className="h-4 w-4 text-emerald-400" />
+            <h3 className="text-sm font-bold text-white">Pipeline de Homologação & Quality Gate (CI/CD)</h3>
+          </div>
+          <button
+            onClick={() => copyToClipboard(CICD_PIPELINE_SNIPPET, 'cicd-pipeline')}
+            className="flex items-center gap-1 text-[11px] font-medium text-slate-300 hover:text-white bg-slate-800 px-2 py-1 rounded"
+          >
+            {copiedSection === 'cicd-pipeline' ? (
+              <>
+                <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                Copiado!
+              </>
+            ) : (
+              <>
+                <Copy className="h-3 w-3" />
+                Copiar Pipeline
+              </>
+            )}
+          </button>
+        </div>
+        <p className="text-xs text-slate-400">
+          Comandos obrigatórios para esteira de integração contínua (CI/CD). A aprovação de release em Staging ou Produção exige 60/60 testes aprovados e zero erros no linter estático:
+        </p>
+        <pre className="rounded-lg border border-slate-800 bg-slate-950 p-3 font-mono text-[11px] text-slate-300 overflow-x-auto leading-relaxed">
+          {CICD_PIPELINE_SNIPPET}
+        </pre>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 text-xs">
+          <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+            <div className="text-emerald-400 font-semibold flex items-center gap-1.5">
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              Testes E2E (60/60)
+            </div>
+            <div className="text-slate-400 text-[11px] mt-1">
+              Valida isolamento estrito, IDOR, CMP, NF-e v4, CNAB 400 e Webhooks.
+            </div>
+          </div>
+          <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+            <div className="text-cyan-400 font-semibold flex items-center gap-1.5">
+              <ShieldCheck className="h-3.5 w-3.5" />
+              TypeScript Estrito
+            </div>
+            <div className="text-slate-400 text-[11px] mt-1">
+              Zero erros de tipagem com <code className="text-slate-300">tsc --noEmit</code>.
+            </div>
+          </div>
+          <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+            <div className="text-indigo-400 font-semibold flex items-center gap-1.5">
+              <Rocket className="h-3.5 w-3.5" />
+              Build Standalone CJS
+            </div>
+            <div className="text-slate-400 text-[11px] mt-1">
+              Backend compilado em arquivo único sem dependência de tsx em produção.
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

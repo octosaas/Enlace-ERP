@@ -1,7 +1,7 @@
 # AGENTS.md — Diretrizes e Convenções para Agentes Autônomos de IA e Engenheiros
 
 > **Enlace ERP** • Plataforma ERP SaaS Multi-Tenant com Isolamento Estrito por CNPJ  
-> Versão Atual: **0.1.1 (PRD 01 ao PRD 09 & PRD PARTE 06 Homologados)**  
+> Versão Atual: **0.1.2 (PRD 01 ao PRD 09, PRD PARTE 06 & Spotlight Search Homologados)**  
 > Última Atualização: **Setembro de 2026**
 
 ---
@@ -144,3 +144,27 @@ npm run build
 - O servidor Express orquestra tanto os endpoints de API `/api/*` quanto o serving dos assets estáticos via Vite middleware em desenvolvimento e `dist/index.html` em produção.
 - **Ingestão de Webhooks de Pagamento**: Endpoint centralizado `/api/webhooks/collections/:provider` recebendo notificações assíncronas dos gateways (Asaas, C6, Cora, Enlace Sandbox) com verificação de assinatura e idempotência nativa por tenant.
 - Artefatos de deploy disponíveis: `Dockerfile` (multi-stage) e `docker-compose.yml`.
+
+---
+
+## 8. Busca Rápida Spotlight & Paleta de Comandos (`Cmd+K` / `Ctrl+K`)
+
+- **Acessibilidade Universal**: Acionável via atalho global de teclado (`⌘K` no macOS e `Ctrl+K` no Windows/Linux) ou por botões dedicados na barra de navegação superior (`Navbar`) e rodapé.
+- **Navegação 100% por Teclado**: Suporte completo a navegação por setas (`↑` e `↓`) com foco visual, seleção por `Enter` e cancelamento por `Esc`.
+- **Isolamento Estrito na Busca**:
+  - Endpoint: `GET /api/v1/search?q=<termo>&limit=30` protegido por `authMiddleware` e `tenantMiddleware`.
+  - A varredura consulta **exclusivamente o schema da empresa ativa** (`tenant_<CNPJ>`).
+  - Cobertura de entidades: Parceiros (Clientes/Fornecedores), Estoque/Produtos, Vendas, Orçamentos, Ordens de Serviço, Contratos Recorrentes, Títulos a Receber/Pagar, Notas Fiscais (NF-e Modelo 55), Compras, Boletos e Cobranças Pix.
+  - Normalização inteligente: busca por CNPJ/CPF pontuado ou apenas numérico sem pontuação.
+
+---
+
+## 9. Checklist de Homologação e Critérios de Aceite
+
+Para submissão a ambientes de Staging ou Produção:
+1. `npm test` aprovando **60/60 testes** sem exceções.
+2. `npm run lint` retornando **0 erros de tipagem estrita**.
+3. `npm run build` gerando bundle `dist/` e `dist/server.cjs` com sourcemaps.
+4. Isolamento comprovado por teste IDOR: nenhuma rota responde a dados de schema divergente do `activeMembership`.
+5. Imunidade institucional do Owner incondicionalmente preservada.
+

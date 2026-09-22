@@ -25,6 +25,8 @@ O **Enlace ERP** é uma plataforma horizontal de gestão empresarial (Enterprise
 | **PRD 08** | **Compras & Suprimentos** | Requisições de compra com alçadas de aprovação e centro de custos, cotações com mapa comparativo de fornecedores e cálculo de saving, e conferência 3-Way Matching com importação de XML. |
 | **PRD 09** | **Cobrança Bancária, CNAB & Pix** | Emissão de boletos FEBRABAN com código de barras de 44 dígitos e linha digitável, remessa e retorno CNAB 400 com baixa automática de títulos, Pix dinâmico com payload EMV e QR Code vetorial, simulador Bacen SPI e régua de cobrança (*dunning*). |
 | **PRD P06** | **Cobrança & Contas a Receber** | Desacoplamento fisiológico (Receivables x Collections), motor de cálculo de juros diários/multa/desconto, gateways plugáveis (Asaas, C6, Cora, Enlace), webhooks idempotentes com conciliação e baixa em tempo real. |
+| **UX & Produtividade** | **Busca Spotlight & Paleta (`Cmd+K`)** | Paleta de comandos global via teclado (`⌘K`/`Ctrl+K`), busca em tempo real com isolamento estrito de schema e navegação instantânea. |
+
 
 ---
 

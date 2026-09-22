@@ -20,6 +20,7 @@ import {
   Landmark,
   Truck,
   Banknote,
+  CreditCard,
 } from 'lucide-react';
 
 interface ModuleItem {
@@ -101,6 +102,8 @@ export const ModulesView: React.FC = () => {
         return <Truck className="h-5 w-5 text-indigo-400" />;
       case 'banking':
         return <Banknote className="h-5 w-5 text-emerald-400" />;
+      case 'collections':
+        return <CreditCard className="h-5 w-5 text-emerald-400" />;
       default:
         return <Layers className="h-5 w-5 text-slate-400" />;
     }

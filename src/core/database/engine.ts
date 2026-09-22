@@ -427,6 +427,7 @@ class DatabaseEngine {
         fiscal: true,
         purchases: true,
         banking: true,
+        collections: true,
       },
       records: [
         {
@@ -2224,6 +2225,7 @@ class DatabaseEngine {
         contracts: false,
         billing: true,
         banking: true,
+        collections: true,
       },
       records: [
         {

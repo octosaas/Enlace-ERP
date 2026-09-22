@@ -117,3 +117,14 @@
     - Deduplicação por hash de evento (`webhook_events_v2`) respondendo `DUPLICATE` em retentativas.
     - Liquidação automática em lote ou unitária reconciliando Cobrança (`PAID`), Título (`PAID`) e Tesouraria (`payments_v2`).
   - **Isolamento Estrito Multi-Tenant**: Dados financeiros e credenciais de provedores estritamente isolados no schema `tenant_<CNPJ>`.
+
+---
+
+## 11. Produtividade & UX: Busca Global Spotlight & Paleta de Comandos (`Cmd+K`)
+- **Objetivo**: Acesso instantâneo e universal a todos os módulos e registros da aplicação via teclado, com isolamento estrito de schema.
+- **Estrutura**:
+  - Atalho global de teclado (`⌘K` no macOS / `Ctrl+K` no Windows/Linux) com navegação completa via setas, Enter e Esc.
+  - Endpoint protegido: `GET /api/v1/search?q=<termo>` com validação de tenant (`activeMembership`).
+  - Indexação em tempo real de clientes, fornecedores, vendas, orçamentos, ordens de serviço, notas fiscais, títulos a receber/pagar, boletos e cobranças Pix.
+  - Normalização automática de termos e documentos com ou sem máscara.
+

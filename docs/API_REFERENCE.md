@@ -126,3 +126,34 @@ Emite uma Cobrança (`Collection`) para um Título a Receber existente, utilizan
 
 ### `GET /api/v1/collections/receivables/:id/amount`
 Retorna o cálculo dinâmico pro-rata die do saldo atualizado do título, decompondo valor original, juros acumulados, multa e desconto por antecipação.
+
+---
+
+## 6. Busca Global Spotlight & Paleta de Comandos (`Cmd+K`)
+
+### `GET /api/v1/search?q=<termo>&limit=30`
+Executa uma busca em tempo real com varredura em todas as entidades do schema da empresa ativa.
+- **Cabeçalhos Obrigatórios**:
+  - `Authorization: Bearer <JWT_ACCESS_TOKEN>`
+  - `X-Tenant-Id: <CNPJ>`
+- **Query Parameters**:
+  - `q`: Termo a ser pesquisado (nome, razão social, CPF/CNPJ com ou sem máscara, número de pedido, NF-e, OS, etc.). Mínimo: 2 caracteres.
+  - `limit`: Quantidade máxima de resultados (padrão: 30, máximo: 100).
+- **Resposta**:
+  ```json
+  {
+    "success": true,
+    "data": [
+      {
+        "id": "so-1001",
+        "category": "sales",
+        "title": "Pedido de Venda #SO-1001",
+        "subtitle": "Alfa Corp • R$ 4.500,00",
+        "targetView": "sales",
+        "badge": "Vendas",
+        "date": "2026-09-22"
+      }
+    ]
+  }
+  ```
+

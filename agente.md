@@ -12,5 +12,8 @@ Consulte o documento completo em:
 1. **Isolamento de Schemas por CNPJ**: Cada tenant opera em `tenant_<CNPJ>` no PostgreSQL. Proibido misturar dados em tabelas com coluna `tenant_id`.
 2. **Governança RBAC**: Matriz de 5 papéis (`owner`, `admin`, `manager`, `operator`, `viewer`) com imunidade institucional do `owner` (PRD 02 - Seção 21).
 3. **Precisão BRL**: Arredondamento monetário estrito de duas casas decimais com `BoletoMath.roundBRL`.
-4. **Bateria de Testes**: 55/55 testes automatizados em `tests/isolation.test.ts` devem ser mantidos 100% aprovados em qualquer alteração.
+4. **Bateria de Testes**: 60/60 testes automatizados em `tests/isolation.test.ts` devem ser mantidos 100% aprovados em qualquer alteração.
 5. **Porta do Servidor**: Obrigatoriamente porta `3000` (`0.0.0.0:3000`).
+6. **Cobrança Desacoplada & Webhooks (PRD PARTE 06)**: Desacoplamento fisiológico (Receivables x Collections), gateways plugáveis e webhooks idempotentes.
+7. **Busca Spotlight & Paleta de Comandos (Cmd+K)**: Navegação global por teclado e busca indexada em tempo real com isolamento estrito de schema (`tenant_<CNPJ>`).
+
