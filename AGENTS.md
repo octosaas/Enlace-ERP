@@ -1,7 +1,7 @@
 # AGENTS.md — Diretrizes e Convenções para Agentes Autônomos de IA e Engenheiros
 
 > **Enlace ERP** • Plataforma ERP SaaS Multi-Tenant com Isolamento Estrito por CNPJ  
-> Versão Atual: **0.1.0 (PRD 01 ao PRD 09 Homologados)**  
+> Versão Atual: **0.1.1 (PRD 01 ao PRD 09 & PRD PARTE 06 Homologados)**  
 > Última Atualização: **Setembro de 2026**
 
 ---
@@ -94,15 +94,27 @@ O sistema implementa 5 papéis corporativos padronizados:
 - Arquivos de Remessa e Retorno CNAB 400 em formato posicional com registros Header, Detalhe (Segmentos) e Trailer.
 - Pix Dinâmico: Payload EMV "Copia e Cola" iniciando em `000201`, cálculo de CRC16-CCITT (`6304XXXX`) e QR Code vetorial SVG.
 
+### F. Cobrança & Contas a Receber (PRD PARTE 06)
+- **Desacoplamento Fisiológico**: O Título a Receber (`Receivable`) representa o direito creditório contratual. A Cobrança (`Collection`) representa o meio efêmero de liquidação. 1 Título pode ter N cobranças sucessivas (Boleto, Pix, Cartão) sem alterar a identidade do contrato.
+- **Motor de Encargos Moratórios & Descontos**:
+  $$\text{Juros Diários} = \text{Valor Original} \times \left(\frac{\text{Taxa Mensal}}{30 \times 100}\right) \times \text{Dias de Atraso}$$
+  $$\text{Multa} = \text{Valor Original} \times \left(\frac{\text{Percentual Multa}}{100}\right) + \text{Multa Fixa}$$
+  - Desconto pontual com trava estrita de data limite: se data atual $\le$ data limite, abate o desconto concedido.
+- **Multi-Gateway Plugável**: Padrão Adapter com suporte a múltiplos provedores (Asaas, C6 Bank, Cora, Enlace Sandbox). Chaves e credenciais criptografadas e isoladas por schema de CNPJ (`payment_providers_v2`).
+- **Webhook Idempotente com Baixa Automática**:
+  - Deduplicação estrita via assinatura / hash de evento (`webhook_events_v2`).
+  - O reenvio do mesmo webhook resulta em `DUPLICATE` sem gerar pagamentos ou baixas duplicadas.
+  - Baixa automática reconcilia a cobrança (`PAID`), liquida o recebível (`PAID`) e gera o registro financeiro de tesouraria (`payments_v2`).
+
 ---
 
 ## 5. Protocolo de Verificação e Testes Obrigatório
 
-O repositório possui uma suíte completa de **55 testes automatizados de ponta a ponta** localizada em `tests/isolation.test.ts`.
+O repositório possui uma suíte completa de **60 testes automatizados de ponta a ponta** localizada em `tests/isolation.test.ts`.
 
 ### Comandos de Validação:
 ```bash
-# Executar a bateria de testes completa (55/55 testes devem passar)
+# Executar a bateria de testes completa (60/60 testes devem passar)
 npm test
 # ou: npx tsx tests/isolation.test.ts
 
@@ -113,7 +125,7 @@ npm run lint
 npm run build
 ```
 
-> ⚠️ **REGRA DE OURO**: Qualquer modificação no código-fonte DEVE manter todos os 55 testes verdes. Não altere os testes para mascarar quebras de contrato de negócio.
+> ⚠️ **REGRA DE OURO**: Qualquer modificação no código-fonte DEVE manter todos os 60 testes verdes. Não altere os testes para mascarar quebras de contrato de negócio.
 
 ---
 
@@ -130,4 +142,5 @@ npm run build
 
 - A aplicação DEVE rodar obrigatoriamente na porta **3000** vinculada a `0.0.0.0`.
 - O servidor Express orquestra tanto os endpoints de API `/api/*` quanto o serving dos assets estáticos via Vite middleware em desenvolvimento e `dist/index.html` em produção.
+- **Ingestão de Webhooks de Pagamento**: Endpoint centralizado `/api/webhooks/collections/:provider` recebendo notificações assíncronas dos gateways (Asaas, C6, Cora, Enlace Sandbox) com verificação de assinatura e idempotência nativa por tenant.
 - Artefatos de deploy disponíveis: `Dockerfile` (multi-stage) e `docker-compose.yml`.

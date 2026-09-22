@@ -1,7 +1,7 @@
-# Visão Geral dos PRDs (PRD 01 a 09) — Enlace ERP
+# Visão Geral dos PRDs (PRD 01 a 09 & PRD PARTE 06) — Enlace ERP
 
 > **Enlace ERP** • Especificação Funcional e Técnica dos Módulos Homologados  
-> Status: **100% Homologado e Testado (55/55 Testes Verdes)**
+> Status: **100% Homologado e Testado (60/60 Testes Verdes)**
 
 ---
 
@@ -103,3 +103,17 @@
   - Cobrança Pix Dinâmica com payload EMV padrão Bacen (iniciando em `000201`), CRC16 e QR Code SVG vetorial.
   - Liquidação instantânea via simulador SPI do Banco Central com atualização de saldo em tesouraria.
   - Régua de Cobrança (*dunning*) automatizada preventiva e reativa com notificações.
+
+---
+
+## 10. PRD PARTE 06: Cobrança & Contas a Receber (Desacoplamento Fisiológico & Gateways)
+- **Objetivo**: Arquitetura desacoplada e robusta para gestão de títulos a receber, motor de juros/multas/descontos pro-rata die, múltiplos gateways de pagamento plugáveis e webhooks idempotentes em tempo real.
+- **Estrutura**:
+  - **Desacoplamento Fisiológico**: O Título a Receber (`Receivable`) mantém a integridade do direito de crédito contratual. A Cobrança (`Collection`) é o artefato efêmero de liquidação. Cancelar ou reemitir cobranças (Boleto/Pix) não viola nem altera o saldo contratual original.
+  - **Motor Matemático de Encargos**: Juros de mora diários simples/compostos calculados pro-rata die, multa percentual/fixa e desconto por antecipação com verificação estrita de data limite.
+  - **Multi-Gateway Plugável**: Padrão Adapter com suporte a múltiplos provedores bancários (Asaas, C6 Bank, Cora, Enlace Sandbox), isolando chaves e credenciais criptografadas por schema de CNPJ (`payment_providers_v2`).
+  - **Webhooks Idempotentes com Baixa Automática**:
+    - Recepção centralizada em `/api/webhooks/collections/:provider`.
+    - Deduplicação por hash de evento (`webhook_events_v2`) respondendo `DUPLICATE` em retentativas.
+    - Liquidação automática em lote ou unitária reconciliando Cobrança (`PAID`), Título (`PAID`) e Tesouraria (`payments_v2`).
+  - **Isolamento Estrito Multi-Tenant**: Dados financeiros e credenciais de provedores estritamente isolados no schema `tenant_<CNPJ>`.

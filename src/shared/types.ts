@@ -1564,5 +1564,249 @@ export interface BankingDashboardMetrics {
   }[];
 }
 
+// ============================================================================
+// PRD PARTE 06 — COBRANÇA E CONTAS A RECEBER (Separation: Billing -> Receivable -> Collection -> Payment)
+// ============================================================================
 
+export type ReceivableStatus =
+  | 'PENDING'
+  | 'PARTIALLY_PAID'
+  | 'PAID'
+  | 'OVERDUE'
+  | 'CANCELED'
+  | 'WRITTEN_OFF';
 
+export type ReceivableInstallmentStatus =
+  | 'PENDING'
+  | 'PARTIALLY_PAID'
+  | 'PAID'
+  | 'OVERDUE'
+  | 'CANCELED';
+
+export interface ReceivableInstallment {
+  id: string;
+  receivableId: string;
+  installmentNumber: number;
+  totalInstallments: number;
+  amount: number;
+  paidAmount: number;
+  remainingAmount: number;
+  dueDate: string;
+  status: ReceivableInstallmentStatus;
+}
+
+export type InterestType = 'PERCENTAGE' | 'FIXED';
+export type FineType = 'PERCENTAGE' | 'FIXED';
+export type DiscountType = 'PERCENTAGE' | 'FIXED';
+
+export interface Receivable {
+  id: string;
+  instanceId: string;
+  customerId: string;
+  customerName: string;
+  customerDocument: string;
+  billingId?: string;
+  status: ReceivableStatus;
+  description: string;
+  originalAmount: number;
+  paidAmount: number;
+  remainingAmount: number;
+  discountType?: DiscountType;
+  discountValue?: number;
+  discountAmount: number;
+  discountDeadline?: string;
+  interestType?: InterestType;
+  interestValue?: number;
+  interestAmount: number;
+  fineType?: FineType;
+  fineValue?: number;
+  fineAmount: number;
+  currentAmount: number;
+  issueDate: string;
+  dueDate: string;
+  installments: ReceivableInstallment[];
+  collectionId?: string;
+  notes?: string;
+  metadata?: Record<string, any>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type CollectionMethod = 'PIX' | 'BOLETO' | 'PAYMENT_LINK' | 'MANUAL';
+
+export type CollectionStatus =
+  | 'CREATED'
+  | 'PENDING'
+  | 'ACTIVE'
+  | 'PAID'
+  | 'OVERDUE'
+  | 'CANCELED'
+  | 'EXPIRED'
+  | 'FAILED';
+
+export interface Collection {
+  id: string;
+  instanceId: string;
+  receivableId: string;
+  installmentId?: string;
+  providerId: string;
+  providerType: string;
+  externalId: string;
+  method: CollectionMethod;
+  status: CollectionStatus;
+  amount: number;
+  dueDate: string;
+  paymentUrl?: string;
+  pixCode?: string;
+  pixQrCodeSvg?: string;
+  txid?: string;
+  barcode?: string;
+  digitableLine?: string;
+  bank?: string;
+  ourNumber?: string;
+  documentNumber?: string;
+  idempotencyKey?: string;
+  reissuedFromId?: string;
+  failureReason?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type PaymentMethodType = 'PIX' | 'BOLETO' | 'PAYMENT_LINK' | 'MANUAL' | 'TRANSFER' | 'CASH';
+
+export type PaymentRecordStatus = 'CONFIRMED' | 'REVERSED';
+
+export interface PaymentRecord {
+  id: string;
+  instanceId: string;
+  receivableId: string;
+  installmentId?: string;
+  collectionId?: string;
+  amount: number;
+  paymentDate: string;
+  method: PaymentMethodType;
+  externalId?: string;
+  status: PaymentRecordStatus;
+  reversalReason?: string;
+  reversedAt?: string;
+  recordedBy?: {
+    id: string;
+    name: string;
+  };
+  notes?: string;
+  createdAt: string;
+}
+
+export type PaymentProviderType = 'ENLACE_SANDBOX' | 'ASAAS' | 'C6' | 'CORA' | 'INTER' | 'MANUAL';
+
+export type PaymentProviderEnvironment = 'SANDBOX' | 'PRODUCTION';
+
+export interface PaymentProviderConfig {
+  id: string;
+  instanceId: string;
+  name: string;
+  providerType: PaymentProviderType;
+  environment: PaymentProviderEnvironment;
+  isActive: boolean;
+  isDefault: boolean;
+  supportedMethods: CollectionMethod[];
+  credentials: Record<string, string>;
+  maskedCredentials: Record<string, string>;
+  accountInfo?: {
+    bankCode?: string;
+    bankName?: string;
+    agency?: string;
+    accountNumber?: string;
+    pixKey?: string;
+    pixKeyType?: string;
+  };
+  methodOverrides?: Partial<Record<CollectionMethod, string>>; // Method -> ProviderConfig ID
+  webhookSecret?: string;
+  webhookUrl?: string;
+  lastTestedAt?: string;
+  lastTestStatus?: 'SUCCESS' | 'FAILED';
+  lastTestMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type WebhookEventStatus = 'PROCESSED' | 'REJECTED' | 'IGNORED';
+
+export interface WebhookEventRecord {
+  id: string;
+  instanceId: string;
+  provider: string;
+  externalEventId: string;
+  payloadHash: string;
+  event: string;
+  payload: Record<string, any>;
+  receivedAt: string;
+  processedAt?: string;
+  status: WebhookEventStatus;
+  error?: string;
+}
+
+export interface ReceivablesDashboardMetrics {
+  totalOpen: number;
+  totalOverdue: number;
+  totalReceived: number;
+  dueToday: number;
+  dueNext7Days: number;
+  partialPaymentsCount: number;
+  activeCollectionsCount: number;
+  failedCollectionsCount: number;
+  receivablesByStatus: Record<ReceivableStatus, number>;
+  collectionsByMethod: Record<CollectionMethod, number>;
+  agingSummary: {
+    onTime: number;
+    overdue1To30: number;
+    overdue31To60: number;
+    overdue61To90: number;
+    overdue90Plus: number;
+  };
+}
+
+export interface CustomerReceivablesSummary {
+  customerId: string;
+  customerName: string;
+  customerDocument: string;
+  totalOpen: number;
+  totalOverdue: number;
+  totalPaid: number;
+  isDefaulting: boolean;
+  receivablesCount: number;
+  overdueCount: number;
+}
+
+// ============================================================================
+// SPOTLIGHT SEARCH & COMMAND PALETTE TYPES
+// ============================================================================
+
+export type SpotlightRecordType =
+  | 'module'
+  | 'action'
+  | 'partner'
+  | 'product'
+  | 'sale'
+  | 'quote'
+  | 'serviceOrder'
+  | 'contract'
+  | 'receivable'
+  | 'payable'
+  | 'warehouse'
+  | 'nfe'
+  | 'purchase'
+  | 'boleto'
+  | 'pix';
+
+export interface SpotlightRecordResult {
+  id: string;
+  type: SpotlightRecordType;
+  category: string;
+  title: string;
+  subtitle: string;
+  badge?: string;
+  badgeColor?: 'emerald' | 'indigo' | 'amber' | 'blue' | 'rose' | 'purple' | 'cyan' | 'slate';
+  targetTab: string;
+  meta?: Record<string, any>;
+}

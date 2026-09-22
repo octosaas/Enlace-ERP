@@ -243,6 +243,31 @@ export const PERMISSIONS = {
   CNAB_REMESSA_GENERATE: 'cnab.remessa.generate',
   CNAB_RETORNO_PROCESS: 'cnab.retorno.process',
   DUNNING_RULES_MANAGE: 'dunning.rules.manage',
+
+  // ============================================================================
+  // PRD PARTE 06 — COBRANÇA E CONTAS A RECEBER (SEÇÃO 53)
+  // ============================================================================
+  RECEIVABLES_DELETE: 'receivables.delete',
+  RECEIVABLES_WRITE_OFF: 'receivables.write_off',
+  RECEIVABLES_EXPORT: 'receivables.export',
+
+  COLLECTIONS_READ: 'collections.read',
+  COLLECTIONS_CREATE: 'collections.create',
+  COLLECTIONS_UPDATE: 'collections.update',
+  COLLECTIONS_CANCEL: 'collections.cancel',
+  COLLECTIONS_REISSUE: 'collections.reissue',
+  COLLECTIONS_EXPORT: 'collections.export',
+
+  PAYMENTS_READ: 'payments.read',
+  PAYMENTS_CREATE: 'payments.create',
+  PAYMENTS_UPDATE: 'payments.update',
+  PAYMENTS_REVERSE: 'payments.reverse',
+  PAYMENTS_EXPORT: 'payments.export',
+
+  PAYMENT_PROVIDERS_READ: 'payment_providers.read',
+  PAYMENT_PROVIDERS_CREATE: 'payment_providers.create',
+  PAYMENT_PROVIDERS_UPDATE: 'payment_providers.update',
+  PAYMENT_PROVIDERS_DELETE: 'payment_providers.delete',
 } as const;
 
 export type PermissionKey = typeof PERMISSIONS[keyof typeof PERMISSIONS];

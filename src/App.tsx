@@ -3,9 +3,10 @@
  * PRD 01 & PRD 02 - Fundação, Multi-Tenant, Identidade e Governança RBAC
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './ui/contexts/AuthContext.js';
 import { Navbar } from './ui/components/Navbar.js';
+import { CommandPalette } from './ui/components/CommandPalette.js';
 import { LoginView } from './ui/views/LoginView.js';
 import { CompanySelectorView } from './ui/views/CompanySelectorView.js';
 import { DashboardView } from './ui/views/DashboardView.js';
@@ -34,6 +35,20 @@ const AppContent: React.FC = () => {
   const { user, activeCompany, isLoading } = useAuth();
   const [currentTab, setCurrentTab] = useState<string>('dashboard');
   const [isSwitchingCompany, setIsSwitchingCompany] = useState<boolean>(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState<boolean>(false);
+
+  // Atalho global do teclado: Cmd+K (Mac) ou Ctrl+K (Windows/Linux)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setIsCommandPaletteOpen((prev) => !prev);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   if (isLoading) {
     return (
@@ -79,6 +94,20 @@ const AppContent: React.FC = () => {
         currentTab={currentTab}
         onTabChange={setCurrentTab}
         onSwitchCompany={() => setIsSwitchingCompany(true)}
+        onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
+      />
+
+      <CommandPalette
+        isOpen={isCommandPaletteOpen}
+        onClose={() => setIsCommandPaletteOpen(false)}
+        onNavigateTab={(tab) => {
+          setCurrentTab(tab);
+          setIsCommandPaletteOpen(false);
+        }}
+        onSwitchCompany={() => {
+          setIsSwitchingCompany(true);
+          setIsCommandPaletteOpen(false);
+        }}
       />
 
       <main className="flex-1 mx-auto w-full max-w-7xl px-4 py-6 sm:px-6">
@@ -121,6 +150,16 @@ const AppContent: React.FC = () => {
               className="text-indigo-400 hover:text-indigo-300 hover:underline transition-colors"
             >
               Deploy & SRE
+            </button>
+            <span className="text-slate-700">•</span>
+            <button
+              id="footer-spotlight-trigger"
+              onClick={() => setIsCommandPaletteOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-md bg-slate-900 border border-slate-800 px-2 py-0.5 text-xs text-slate-400 hover:text-emerald-400 hover:border-slate-700 transition-colors"
+              title="Abrir busca rápida e paleta de comandos"
+            >
+              <span className="font-mono text-[10px] text-emerald-400/90 font-bold">⌘K / Ctrl+K</span>
+              <span>Busca Rápida</span>
             </button>
           </div>
           <span className="font-mono text-[11px] text-slate-400">

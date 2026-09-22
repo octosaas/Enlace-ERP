@@ -104,6 +104,16 @@ import {
   CollectionDunningRule,
   DunningChannel,
   BankingDashboardMetrics,
+  // PRD PARTE 06
+  Receivable,
+  ReceivableInstallment,
+  Collection,
+  PaymentRecord,
+  PaymentProviderConfig,
+  WebhookEventRecord,
+  ReceivablesDashboardMetrics,
+  CustomerReceivablesSummary,
+  SpotlightRecordResult,
 } from '../../shared/types.js';
 import { ROLE_DEFAULT_PERMISSIONS } from '../../shared/permissions.js';
 import { cleanDocument, formatDocument } from '../../shared/validators.js';
@@ -120,6 +130,8 @@ import { InventoryMath, InventoryEngine } from '../inventory/inventoryEngine.js'
 import { FiscalMath, FiscalXmlGenerator, SpedFiscalEngine } from '../fiscal/fiscalEngine.js';
 import { ProcurementMath, QuotationComparator, NFeXmlParser } from '../procurement/procurementEngine.js';
 import { BoletoMath, PixEngine, CnabEngine, SUPPORTED_BANKS } from '../banking/bankingEngine.js';
+import { CollectionEngine } from '../collection/collectionEngine.js';
+import { PaymentProviderRegistry } from '../collection/paymentProviderRegistry.js';
 
 export interface TenantStorage {
   settings: {
@@ -199,6 +211,13 @@ export interface TenantStorage {
   pixCharges: PixCharge[];
   cnabFiles: CnabFile[];
   dunningRules: CollectionDunningRule[];
+
+  // PRD PARTE 06 - Cobrança e Contas a Receber (Billing -> Receivable -> Collection -> Payment)
+  receivablesV2: Receivable[];
+  collectionsV2: Collection[];
+  paymentsV2: PaymentRecord[];
+  paymentProvidersV2: PaymentProviderConfig[];
+  webhookEventsV2: WebhookEventRecord[];
 }
 
 export type StoredUser = User & {
@@ -2948,9 +2967,9 @@ class DatabaseEngine {
 
   // --- MÉTODOS DO TENANT SCHEMA ---
 
-  provisionTenantSchema(schemaNamespace: string, initialData?: TenantStorage) {
+  provisionTenantSchema(schemaNamespace: string, initialData?: Partial<TenantStorage>) {
     if (!this.tenantSchemas.has(schemaNamespace)) {
-      const storage: TenantStorage = initialData || {
+      const storage: TenantStorage = (initialData as TenantStorage) || {
         settings: {
           timezone: 'America/Sao_Paulo',
           currency: 'BRL',
@@ -3009,6 +3028,11 @@ class DatabaseEngine {
         pixCharges: [],
         cnabFiles: [],
         dunningRules: [],
+        receivablesV2: [],
+        collectionsV2: [],
+        paymentsV2: [],
+        paymentProvidersV2: [],
+        webhookEventsV2: [],
       };
 
       if (!storage.products) storage.products = [];
@@ -3037,6 +3061,11 @@ class DatabaseEngine {
       if (!storage.pixCharges) storage.pixCharges = [];
       if (!storage.cnabFiles) storage.cnabFiles = [];
       if (!storage.dunningRules) storage.dunningRules = [];
+      if (!storage.receivablesV2) storage.receivablesV2 = [];
+      if (!storage.collectionsV2) storage.collectionsV2 = [];
+      if (!storage.paymentsV2) storage.paymentsV2 = [];
+      if (!storage.paymentProvidersV2) storage.paymentProvidersV2 = [];
+      if (!storage.webhookEventsV2) storage.webhookEventsV2 = [];
       if (!storage.sequentialCounters) {
         storage.sequentialCounters = {
           quote: 0,
@@ -3130,6 +3159,34 @@ class DatabaseEngine {
       if (!storage.pixCharges) storage.pixCharges = [];
       if (!storage.cnabFiles) storage.cnabFiles = [];
       if (!storage.dunningRules) storage.dunningRules = [];
+      if (!storage.receivablesV2) storage.receivablesV2 = [];
+      if (!storage.collectionsV2) storage.collectionsV2 = [];
+      if (!storage.paymentsV2) storage.paymentsV2 = [];
+      if (!storage.paymentProvidersV2 || storage.paymentProvidersV2.length === 0) {
+        storage.paymentProvidersV2 = [
+          {
+            id: `prov_default_${schemaNamespace}`,
+            instanceId: schemaNamespace,
+            name: 'Enlace Sandbox Pagamentos',
+            providerType: 'ENLACE_SANDBOX',
+            environment: 'SANDBOX',
+            isActive: true,
+            isDefault: true,
+            supportedMethods: ['PIX', 'BOLETO', 'PAYMENT_LINK', 'MANUAL'],
+            credentials: { apiKey: 'sbx_sec_enlace_2026' },
+            maskedCredentials: { apiKey: 'sbx_sec_****_2026' },
+            accountInfo: {
+              pixKey: '33.000.167/0001-01',
+              pixKeyType: 'CNPJ',
+              bankCode: '001',
+              bankName: 'Banco do Brasil',
+            },
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        ];
+      }
+      if (!storage.webhookEventsV2) storage.webhookEventsV2 = [];
       if (!storage.sequentialCounters) {
         storage.sequentialCounters = {
           quote: 0,
@@ -9145,6 +9202,810 @@ class DatabaseEngine {
     );
 
     return { dispatchedCount, logs };
+  }
+
+  // ==========================================================================
+  // PRD PARTE 06: COBRANÇA E CONTAS A RECEBER (Separation & Adapters)
+  // ==========================================================================
+
+  createReceivable(
+    schemaNamespace: string,
+    input: any,
+    user?: { id: string; name?: string; email?: string }
+  ): Receivable {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const engine = CollectionEngine.getInstance();
+    const result = engine.createReceivable(storage.receivablesV2, input, schemaNamespace, {
+      id: user?.id || 'usr_system',
+      name: user?.name || user?.email || 'Operador',
+    });
+
+    storage.auditLogs.unshift(result.audit);
+    return result.receivable;
+  }
+
+  listReceivables(
+    schemaNamespace: string,
+    filters?: {
+      status?: string;
+      customerId?: string;
+      startDate?: string;
+      endDate?: string;
+      isOverdue?: boolean;
+    }
+  ): Receivable[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const engine = CollectionEngine.getInstance();
+    return engine.listReceivables(storage.receivablesV2, filters);
+  }
+
+  getReceivable(schemaNamespace: string, id: string): Receivable | undefined {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const engine = CollectionEngine.getInstance();
+    return engine.getReceivable(storage.receivablesV2, id);
+  }
+
+  cancelReceivable(
+    schemaNamespace: string,
+    id: string,
+    reason: string,
+    user?: { id: string; name?: string; email?: string }
+  ): Receivable {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const engine = CollectionEngine.getInstance();
+    const result = engine.cancelReceivable(
+      storage.receivablesV2,
+      storage.collectionsV2,
+      storage.paymentProvidersV2,
+      id,
+      reason,
+      {
+        id: user?.id || 'usr_system',
+        name: user?.name || user?.email || 'Operador',
+      }
+    );
+
+    storage.auditLogs.unshift(result.audit);
+    return result.receivable;
+  }
+
+  recordReceivablePayment(
+    schemaNamespace: string,
+    input: any,
+    user?: { id: string; name?: string; email?: string }
+  ): { receivable: Receivable; payment: PaymentRecord } {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const engine = CollectionEngine.getInstance();
+    const result = engine.recordPayment(
+      storage.receivablesV2,
+      storage.collectionsV2,
+      storage.paymentsV2,
+      input,
+      schemaNamespace,
+      {
+        id: user?.id || 'usr_system',
+        name: user?.name || user?.email || 'Operador',
+      }
+    );
+
+    storage.auditLogs.unshift(result.audit);
+    return { receivable: result.receivable, payment: result.payment };
+  }
+
+  reverseReceivablePayment(
+    schemaNamespace: string,
+    paymentId: string,
+    reason: string,
+    user?: { id: string; name?: string; email?: string }
+  ): { payment: PaymentRecord; receivable: Receivable } {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const engine = CollectionEngine.getInstance();
+    const result = engine.reversePayment(
+      storage.receivablesV2,
+      storage.paymentsV2,
+      paymentId,
+      reason,
+      {
+        id: user?.id || 'usr_system',
+        name: user?.name || user?.email || 'Operador',
+      }
+    );
+
+    storage.auditLogs.unshift(result.audit);
+    return { payment: result.payment, receivable: result.receivable };
+  }
+
+  async createCollection(
+    schemaNamespace: string,
+    input: any,
+    user?: { id: string; name?: string; email?: string }
+  ): Promise<Collection> {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const engine = CollectionEngine.getInstance();
+    const result = await engine.createCollection(
+      storage.receivablesV2,
+      storage.collectionsV2,
+      storage.paymentProvidersV2,
+      input,
+      schemaNamespace,
+      {
+        id: user?.id || 'usr_system',
+        name: user?.name || user?.email || 'Operador',
+      }
+    );
+
+    storage.auditLogs.unshift(result.audit);
+    return result.collection;
+  }
+
+  listCollections(
+    schemaNamespace: string,
+    filters?: {
+      receivableId?: string;
+      method?: string;
+      status?: string;
+    }
+  ): Collection[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    let list = [...storage.collectionsV2];
+    if (filters?.receivableId) {
+      list = list.filter((c) => c.receivableId === filters.receivableId);
+    }
+    if (filters?.method) {
+      list = list.filter((c) => c.method === filters.method);
+    }
+    if (filters?.status) {
+      list = list.filter((c) => c.status === filters.status);
+    }
+    return list;
+  }
+
+  getCollection(schemaNamespace: string, id: string): Collection | undefined {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    return storage.collectionsV2.find((c) => c.id === id);
+  }
+
+  async cancelCollection(
+    schemaNamespace: string,
+    id: string,
+    reason: string,
+    user?: { id: string; name?: string; email?: string }
+  ): Promise<Collection> {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const engine = CollectionEngine.getInstance();
+    const result = await engine.cancelCollection(
+      storage.collectionsV2,
+      storage.paymentProvidersV2,
+      id,
+      reason,
+      {
+        id: user?.id || 'usr_system',
+        name: user?.name || user?.email || 'Operador',
+      }
+    );
+
+    storage.auditLogs.unshift(result.audit);
+    return result.collection;
+  }
+
+  async reissueCollection(
+    schemaNamespace: string,
+    id: string,
+    newDueDate: string,
+    user?: { id: string; name?: string; email?: string }
+  ): Promise<Collection> {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const engine = CollectionEngine.getInstance();
+    const result = await engine.reissueCollection(
+      storage.receivablesV2,
+      storage.collectionsV2,
+      storage.paymentProvidersV2,
+      id,
+      newDueDate,
+      {
+        id: user?.id || 'usr_system',
+        name: user?.name || user?.email || 'Operador',
+      }
+    );
+
+    storage.auditLogs.unshift(result.audit);
+    return result.newCollection;
+  }
+
+  listPaymentsV2(schemaNamespace: string, filters?: { receivableId?: string }): PaymentRecord[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    let list = [...storage.paymentsV2];
+    if (filters?.receivableId) {
+      list = list.filter((p) => p.receivableId === filters.receivableId);
+    }
+    return list;
+  }
+
+  listPaymentProviders(schemaNamespace: string): PaymentProviderConfig[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    return storage.paymentProvidersV2;
+  }
+
+  getPaymentProvider(schemaNamespace: string, id: string): PaymentProviderConfig | undefined {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    return storage.paymentProvidersV2.find((p) => p.id === id);
+  }
+
+  createPaymentProvider(
+    schemaNamespace: string,
+    input: any,
+    user?: { id: string; name?: string; email?: string }
+  ): PaymentProviderConfig {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const id = `prov_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    const credentials = input.credentials || {};
+    const maskedCredentials: Record<string, string> = {};
+
+    for (const [k, v] of Object.entries(credentials)) {
+      const str = String(v);
+      maskedCredentials[k] = str.length > 8 ? `${str.slice(0, 4)}****${str.slice(-4)}` : '****';
+    }
+
+    const provider: PaymentProviderConfig = {
+      id,
+      instanceId: schemaNamespace,
+      name: input.name,
+      providerType: input.providerType,
+      environment: input.environment || 'SANDBOX',
+      isActive: input.isActive !== false,
+      isDefault: input.isDefault === true,
+      supportedMethods: input.supportedMethods || ['PIX', 'BOLETO'],
+      credentials,
+      maskedCredentials,
+      accountInfo: input.accountInfo,
+      methodOverrides: input.methodOverrides,
+      webhookSecret: input.webhookSecret,
+      webhookUrl: input.webhookUrl,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (provider.isDefault) {
+      storage.paymentProvidersV2.forEach((p) => (p.isDefault = false));
+    }
+
+    storage.paymentProvidersV2.unshift(provider);
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'PAYMENT_PROVIDER_CREATED',
+      'payment_provider',
+      provider.id,
+      { name: provider.name, type: provider.providerType },
+      user?.id
+    );
+
+    return provider;
+  }
+
+  updatePaymentProvider(
+    schemaNamespace: string,
+    id: string,
+    input: any,
+    user?: { id: string; name?: string; email?: string }
+  ): PaymentProviderConfig {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const prov = storage.paymentProvidersV2.find((p) => p.id === id);
+    if (!prov) throw new Error(`Provedor [${id}] não encontrado.`);
+
+    if (input.name) prov.name = input.name;
+    if (input.environment) prov.environment = input.environment;
+    if (input.isActive !== undefined) prov.isActive = input.isActive;
+    if (input.supportedMethods) prov.supportedMethods = input.supportedMethods;
+    if (input.accountInfo) prov.accountInfo = input.accountInfo;
+    if (input.methodOverrides) prov.methodOverrides = input.methodOverrides;
+    if (input.webhookSecret !== undefined) prov.webhookSecret = input.webhookSecret;
+    if (input.webhookUrl !== undefined) prov.webhookUrl = input.webhookUrl;
+
+    if (input.credentials) {
+      prov.credentials = { ...prov.credentials, ...input.credentials };
+      for (const [k, v] of Object.entries(prov.credentials)) {
+        const str = String(v);
+        prov.maskedCredentials[k] = str.length > 8 ? `${str.slice(0, 4)}****${str.slice(-4)}` : '****';
+      }
+    }
+
+    if (input.isDefault) {
+      storage.paymentProvidersV2.forEach((p) => (p.isDefault = false));
+      prov.isDefault = true;
+    }
+
+    prov.updatedAt = new Date().toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'PAYMENT_PROVIDER_UPDATED',
+      'payment_provider',
+      prov.id,
+      { name: prov.name },
+      user?.id
+    );
+
+    return prov;
+  }
+
+  async testPaymentProviderConnection(
+    schemaNamespace: string,
+    id: string,
+    user?: { id: string; name?: string; email?: string }
+  ): Promise<{ success: boolean; message: string; latencyMs: number }> {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const prov = storage.paymentProvidersV2.find((p) => p.id === id);
+    if (!prov) throw new Error(`Provedor [${id}] não encontrado.`);
+
+    const registry = PaymentProviderRegistry.getInstance();
+    const adapter = registry.getAdapter(prov.providerType);
+    const result = await adapter.testConnection(prov);
+
+    prov.lastTestedAt = new Date().toISOString();
+    prov.lastTestStatus = result.success ? 'SUCCESS' : 'FAILED';
+    prov.lastTestMessage = result.message;
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'PAYMENT_PROVIDER_TESTED',
+      'payment_provider',
+      prov.id,
+      { success: result.success, latencyMs: result.latencyMs },
+      user?.id
+    );
+
+    return result;
+  }
+
+  setDefaultPaymentProvider(
+    schemaNamespace: string,
+    id: string,
+    user?: { id: string; name?: string; email?: string }
+  ): PaymentProviderConfig {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const prov = storage.paymentProvidersV2.find((p) => p.id === id);
+    if (!prov) throw new Error(`Provedor [${id}] não encontrado.`);
+
+    storage.paymentProvidersV2.forEach((p) => (p.isDefault = false));
+    prov.isDefault = true;
+    prov.updatedAt = new Date().toISOString();
+
+    this.recordTenantAudit(
+      schemaNamespace,
+      'PAYMENT_PROVIDER_SET_DEFAULT',
+      'payment_provider',
+      prov.id,
+      { name: prov.name },
+      user?.id
+    );
+
+    return prov;
+  }
+
+  async processWebhookPayment(
+    providerName: string,
+    payload: any,
+    headers?: Record<string, string>
+  ): Promise<{ status: string; message: string; details?: any }> {
+    const engine = CollectionEngine.getInstance();
+    return engine.processWebhook(this.tenantSchemas, providerName, payload, headers);
+  }
+
+  getReceivablesDashboardMetrics(schemaNamespace: string): ReceivablesDashboardMetrics {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const engine = CollectionEngine.getInstance();
+    return engine.getDashboardMetrics(storage.receivablesV2, storage.collectionsV2);
+  }
+
+  getCustomerReceivablesSummary(
+    schemaNamespace: string,
+    customerId: string
+  ): CustomerReceivablesSummary {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const engine = CollectionEngine.getInstance();
+    return engine.getCustomerSummary(storage.receivablesV2, customerId);
+  }
+
+  /**
+   * Pesquisa Unificada Spotlight nos registros do Tenant Schema ativo
+   * Busca em parceiros, produtos, vendas, orçamentos, OS, contratos, financeiro, estoque, NF-e, compras e cobrança
+   */
+  searchTenantRecords(
+    schemaNamespace: string,
+    query: string,
+    limit: number = 30
+  ): SpotlightRecordResult[] {
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) return [];
+
+    const q = (query || '').trim().toLowerCase();
+    if (!q) return [];
+
+    const cleanDigits = q.replace(/\D/g, '');
+    const results: SpotlightRecordResult[] = [];
+
+    // 1. Parceiros Comerciais (Clientes, Fornecedores, etc)
+    if (storage.partners) {
+      for (const p of storage.partners) {
+        const matches =
+          p.name?.toLowerCase().includes(q) ||
+          p.tradeName?.toLowerCase().includes(q) ||
+          p.email?.toLowerCase().includes(q) ||
+          (cleanDigits.length >= 3 && p.document?.includes(cleanDigits)) ||
+          p.address?.city?.toLowerCase().includes(q) ||
+          p.roles?.some((r) => r.toLowerCase().includes(q));
+
+        if (matches) {
+          results.push({
+            id: p.id,
+            type: 'partner',
+            category: 'Parceiros Comerciais',
+            title: p.tradeName || p.name,
+            subtitle: `${p.name && p.tradeName && p.name !== p.tradeName ? `${p.name} • ` : ''}${formatDocument(p.document)} • ${p.email || p.address?.city || 'Cadastrado'}`,
+            badge: p.roles && p.roles.length > 0 ? p.roles.join(', ') : p.status,
+            badgeColor: 'indigo',
+            targetTab: 'masterdata',
+            meta: { document: p.document, email: p.email, status: p.status },
+          });
+        }
+      }
+    }
+
+    // 2. Produtos & Serviços
+    if (storage.products) {
+      for (const prod of storage.products) {
+        const matches =
+          prod.name?.toLowerCase().includes(q) ||
+          prod.code?.toLowerCase().includes(q) ||
+          prod.description?.toLowerCase().includes(q);
+
+        if (matches) {
+          results.push({
+            id: prod.id,
+            type: 'product',
+            category: 'Produtos & Serviços',
+            title: `[${prod.code}] ${prod.name}`,
+            subtitle: `${prod.type === 'SERVICE' ? 'Serviço' : 'Produto'} • R$ ${Number(prod.unitPrice || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })} / ${prod.unit || 'UN'}`,
+            badge: prod.type === 'SERVICE' ? 'SERVIÇO' : 'PRODUTO',
+            badgeColor: 'emerald',
+            targetTab: 'commercial',
+            meta: { code: prod.code, price: prod.unitPrice, type: prod.type },
+          });
+        }
+      }
+    }
+
+    // 3. Pedidos de Venda
+    if (storage.sales) {
+      for (const s of storage.sales) {
+        const matches =
+          s.number?.toLowerCase().includes(q) ||
+          s.customerName?.toLowerCase().includes(q) ||
+          s.notes?.toLowerCase().includes(q) ||
+          s.items?.some((it) => it.description?.toLowerCase().includes(q));
+
+        if (matches) {
+          results.push({
+            id: s.id,
+            type: 'sale',
+            category: 'Vendas & Operações',
+            title: `Pedido ${s.number} • ${s.customerName || 'Cliente'}`,
+            subtitle: `Total: R$ ${Number(s.total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })} • Data: ${s.saleDate || (s.createdAt ? s.createdAt.split('T')[0] : '')}`,
+            badge: s.status,
+            badgeColor: s.status === 'COMPLETED' ? 'emerald' : s.status === 'CONFIRMED' ? 'blue' : 'amber',
+            targetTab: 'commercial',
+            meta: { number: s.number, total: s.total, status: s.status },
+          });
+        }
+      }
+    }
+
+    // 4. Orçamentos Comerciais
+    if (storage.quotes) {
+      for (const quote of storage.quotes) {
+        const matches =
+          quote.number?.toLowerCase().includes(q) ||
+          quote.customerName?.toLowerCase().includes(q) ||
+          quote.description?.toLowerCase().includes(q);
+
+        if (matches) {
+          results.push({
+            id: quote.id,
+            type: 'quote',
+            category: 'Orçamentos Comerciais',
+            title: `Orçamento ${quote.number} • ${quote.customerName || 'Cliente'}`,
+            subtitle: `Total: R$ ${Number(quote.total || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })} • Venc: ${quote.validUntil || '-'}`,
+            badge: quote.status,
+            badgeColor: quote.status === 'APPROVED' ? 'emerald' : quote.status === 'REJECTED' ? 'rose' : 'blue',
+            targetTab: 'commercial',
+            meta: { number: quote.number, total: quote.total, status: quote.status },
+          });
+        }
+      }
+    }
+
+    // 5. Ordens de Serviço (OS)
+    if (storage.serviceOrders) {
+      for (const os of storage.serviceOrders) {
+        const matches =
+          os.number?.toLowerCase().includes(q) ||
+          os.title?.toLowerCase().includes(q) ||
+          os.customerName?.toLowerCase().includes(q) ||
+          os.assignedUserName?.toLowerCase().includes(q);
+
+        if (matches) {
+          results.push({
+            id: os.id,
+            type: 'serviceOrder',
+            category: 'Ordens de Serviço',
+            title: `${os.number}: ${os.title}`,
+            subtitle: `Cliente: ${os.customerName || 'Cliente'} • Resp: ${os.assignedUserName || 'Equipe Técnica'}`,
+            badge: os.status,
+            badgeColor: os.status === 'COMPLETED' ? 'emerald' : os.priority === 'URGENT' ? 'rose' : 'purple',
+            targetTab: 'commercial',
+            meta: { number: os.number, status: os.status, priority: os.priority },
+          });
+        }
+      }
+    }
+
+    // 6. Contratos de Faturamento
+    if (storage.contracts) {
+      for (const c of storage.contracts) {
+        const matches =
+          c.number?.toLowerCase().includes(q) ||
+          c.title?.toLowerCase().includes(q) ||
+          c.customerName?.toLowerCase().includes(q);
+
+        if (matches) {
+          results.push({
+            id: c.id,
+            type: 'contract',
+            category: 'Contratos & Recorrência',
+            title: `Contrato ${c.number || c.id} • ${c.title}`,
+            subtitle: `Cliente: ${c.customerName || 'Cliente'} • R$ ${Number(c.value || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })} / ${c.billingFrequency || 'MÊS'}`,
+            badge: c.status,
+            badgeColor: c.status === 'ACTIVE' ? 'emerald' : 'slate',
+            targetTab: 'billing',
+            meta: { number: c.number, value: c.value, status: c.status },
+          });
+        }
+      }
+    }
+
+    // 7. Contas a Receber (Financeiro V1 & V2)
+    if (storage.accountsReceivable) {
+      for (const r of storage.accountsReceivable) {
+        const matches =
+          r.number?.toLowerCase().includes(q) ||
+          r.description?.toLowerCase().includes(q) ||
+          r.customerName?.toLowerCase().includes(q);
+
+        if (matches) {
+          results.push({
+            id: r.id,
+            type: 'receivable',
+            category: 'Contas a Receber',
+            title: `A Receber: ${r.number || r.id} - ${r.description}`,
+            subtitle: `Cliente: ${r.customerName} • R$ ${Number(r.originalValue || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })} • Venc: ${r.dueDate}`,
+            badge: r.status,
+            badgeColor: r.status === 'PAID' ? 'emerald' : r.status === 'OVERDUE' ? 'rose' : 'amber',
+            targetTab: 'financial',
+            meta: { number: r.number, amount: r.originalValue, dueDate: r.dueDate, status: r.status },
+          });
+        }
+      }
+    }
+
+    if (storage.receivablesV2) {
+      for (const r of storage.receivablesV2) {
+        const matches =
+          r.id?.toLowerCase().includes(q) ||
+          r.customerId?.toLowerCase().includes(q) ||
+          r.status?.toLowerCase().includes(q);
+
+        if (matches) {
+          results.push({
+            id: r.id,
+            type: 'receivable',
+            category: 'Contas a Receber (V2)',
+            title: `Recebível ${r.id}`,
+            subtitle: `Cliente: ${r.customerId} • R$ ${Number(r.originalAmount || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })} • Venc: ${r.dueDate}`,
+            badge: r.status,
+            badgeColor: r.status === 'PAID' ? 'emerald' : r.status === 'OVERDUE' ? 'rose' : 'amber',
+            targetTab: 'financial',
+            meta: { amount: r.originalAmount, dueDate: r.dueDate, status: r.status },
+          });
+        }
+      }
+    }
+
+    // 8. Contas a Pagar
+    if (storage.accountsPayable) {
+      for (const p of storage.accountsPayable) {
+        const matches =
+          p.number?.toLowerCase().includes(q) ||
+          p.description?.toLowerCase().includes(q) ||
+          p.supplierName?.toLowerCase().includes(q);
+
+        if (matches) {
+          results.push({
+            id: p.id,
+            type: 'payable',
+            category: 'Contas a Pagar',
+            title: `A Pagar: ${p.number || p.id} - ${p.description}`,
+            subtitle: `Favorecido: ${p.supplierName || 'Fornecedor'} • R$ ${Number(p.originalValue || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })} • Venc: ${p.dueDate}`,
+            badge: p.status,
+            badgeColor: p.status === 'PAID' ? 'emerald' : 'rose',
+            targetTab: 'financial',
+            meta: { number: p.number, amount: p.originalValue, dueDate: p.dueDate, status: p.status },
+          });
+        }
+      }
+    }
+
+    // 9. Depósitos e Almoxarifados (WMS)
+    if (storage.warehouses) {
+      for (const w of storage.warehouses) {
+        const matches =
+          w.code?.toLowerCase().includes(q) ||
+          w.name?.toLowerCase().includes(q) ||
+          w.location?.toLowerCase().includes(q);
+
+        if (matches) {
+          results.push({
+            id: w.id,
+            type: 'warehouse',
+            category: 'Estoque & Depósitos',
+            title: `Depósito [${w.code}] ${w.name}`,
+            subtitle: `Localização: ${w.location || 'Central'} • ${w.isDefault ? 'Depósito Principal' : 'Almoxarifado'}`,
+            badge: w.isActive ? 'ATIVO' : 'INATIVO',
+            badgeColor: 'amber',
+            targetTab: 'inventory',
+            meta: { code: w.code, location: w.location },
+          });
+        }
+      }
+    }
+
+    // 10. Notas Fiscais (NF-e Modelo 55 / DF-e)
+    if (storage.fiscalDocuments) {
+      for (const inv of storage.fiscalDocuments) {
+        const matches =
+          inv.number?.toString().includes(q) ||
+          inv.accessKey?.toLowerCase().includes(q) ||
+          inv.partnerName?.toLowerCase().includes(q) ||
+          (cleanDigits.length >= 4 && inv.partnerCnpjCpf?.includes(cleanDigits));
+
+        if (matches) {
+          results.push({
+            id: inv.id,
+            type: 'nfe',
+            category: 'Notas Fiscais (DF-e / NF-e)',
+            title: `NF-e nº ${inv.number} (Série ${inv.series || '1'})`,
+            subtitle: `Dest: ${inv.partnerName || 'Consumidor'} • R$ ${Number(inv.netTotal || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`,
+            badge: inv.status,
+            badgeColor: inv.status === 'AUTHORIZED' ? 'emerald' : inv.status === 'CANCELED' ? 'rose' : 'purple',
+            targetTab: 'fiscal',
+            meta: { number: inv.number, accessKey: inv.accessKey, total: inv.netTotal },
+          });
+        }
+      }
+    }
+
+    // 11. Compras & Pedidos de Suprimentos
+    if (storage.purchaseOrders) {
+      for (const po of storage.purchaseOrders) {
+        const matches =
+          po.number?.toLowerCase().includes(q) ||
+          po.supplierName?.toLowerCase().includes(q) ||
+          po.notes?.toLowerCase().includes(q);
+
+        if (matches) {
+          results.push({
+            id: po.id,
+            type: 'purchase',
+            category: 'Compras & Suprimentos',
+            title: `Pedido de Compra ${po.number} • ${po.supplierName || 'Fornecedor'}`,
+            subtitle: `Total: R$ ${Number(po.grandTotal || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })} • Previsão: ${po.expectedDeliveryDate || '-'}`,
+            badge: po.status,
+            badgeColor: po.status === 'APROVADO' ? 'emerald' : 'cyan',
+            targetTab: 'procurement',
+            meta: { number: po.number, total: po.grandTotal, status: po.status },
+          });
+        }
+      }
+    }
+
+    // 12. Cobrança Bancária (Boletos & Pix)
+    if (storage.bankSlips) {
+      for (const b of storage.bankSlips) {
+        const matches =
+          b.ourNumber?.toLowerCase().includes(q) ||
+          b.payerName?.toLowerCase().includes(q) ||
+          b.documentNumber?.toLowerCase().includes(q) ||
+          b.digitableLine?.includes(q);
+
+        if (matches) {
+          results.push({
+            id: b.id,
+            type: 'boleto',
+            category: 'Cobrança Bancária & Boletos',
+            title: `Boleto #${b.ourNumber} • ${b.payerName || 'Sacado'}`,
+            subtitle: `R$ ${Number(b.amount || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })} • Venc: ${b.dueDate}`,
+            badge: b.status,
+            badgeColor: b.status === 'PAID' ? 'emerald' : b.status === 'CANCELED' ? 'rose' : 'blue',
+            targetTab: 'banking',
+            meta: { ourNumber: b.ourNumber, amount: b.amount, status: b.status },
+          });
+        }
+      }
+    }
+
+    if (storage.pixCharges) {
+      for (const pix of storage.pixCharges) {
+        const matches =
+          pix.txid?.toLowerCase().includes(q) ||
+          pix.customerName?.toLowerCase().includes(q);
+
+        if (matches) {
+          results.push({
+            id: pix.id,
+            type: 'pix',
+            category: 'Cobrança Pix Dinâmico',
+            title: `Pix #${pix.txid?.substring(0, 14)}... • ${pix.customerName || 'Pagador'}`,
+            subtitle: `R$ ${Number(pix.amount || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })} • Status: ${pix.status}`,
+            badge: pix.status,
+            badgeColor: pix.status === 'CONCLUDED' ? 'emerald' : 'purple',
+            targetTab: 'banking',
+            meta: { txid: pix.txid, amount: pix.amount, status: pix.status },
+          });
+        }
+      }
+    }
+
+    return results.slice(0, limit);
   }
 }
 

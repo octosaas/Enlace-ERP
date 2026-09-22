@@ -18,10 +18,12 @@ import { InventoryMath } from '../src/core/inventory/inventoryEngine.js';
 import { FiscalMath } from '../src/core/fiscal/fiscalEngine.js';
 import { ProcurementMath, NFeXmlParser } from '../src/core/procurement/procurementEngine.js';
 import { BoletoMath, CnabEngine, PixEngine } from '../src/core/banking/bankingEngine.js';
+import { ReceivableCalculationService } from '../src/core/collection/receivableCalculationService.js';
+import { PaymentProviderRegistry } from '../src/core/collection/paymentProviderRegistry.js';
 
 async function runTests() {
   console.log('================================================================');
-  console.log(' INICIANDO BATERIA DE TESTES DO ENLACE ERP - PRD 01 A 09        ');
+  console.log(' INICIANDO BATERIA DE TESTES DO ENLACE ERP - PRD 01 A 09 & P06  ');
   console.log('================================================================\n');
 
   await dbEngine.initialize();
@@ -1145,6 +1147,233 @@ async function runTests() {
     Array.isArray(dunningExecution.logs) &&
     hasDunningAudit,
     '55. Execução em Lote da Régua de Cobrança (Dunning Engine) e Trilha de Auditoria (PRD 09)'
+  );
+
+  // ============================================================================
+  // PRD PARTE 06 — COBRANÇA E CONTAS A RECEBER (TESTES 56 A 60)
+  // ============================================================================
+
+  // 56. Desacoplamento Fisiológico entre Contas a Receber e Cobrança (PRD PARTE 06)
+  const rec56 = dbEngine.createReceivable(
+    alfa.schemaNamespace,
+    {
+      customerId: 'cli-acme-corp',
+      customerName: 'Acme Corporation Brasil Ltda',
+      customerDocument: '11222333000181',
+      totalAmount: 1500.0,
+      issueDate: '2026-09-21',
+      dueDate: '2026-10-21',
+      description: 'Consultoria de Arquitetura e Engenharia de Software',
+      category: 'SERVICOS',
+      paymentTerms: 'PARCELADO',
+      installmentsCount: 3,
+      interestRate: 1.0,
+      fineRate: 2.0,
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+
+  const col56 = await dbEngine.createCollection(
+    alfa.schemaNamespace,
+    {
+      receivableId: rec56.id,
+      installmentNumber: 1,
+      method: 'PIX',
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+
+  const initialColStatus = col56.status;
+
+  const rec56Cancelled = dbEngine.cancelReceivable(
+    alfa.schemaNamespace,
+    rec56.id,
+    'Distrato contratual bilateral com cliente',
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+
+  const col56Refreshed = dbEngine.getCollection(alfa.schemaNamespace, col56.id);
+
+  assert(
+    rec56.installments.length === 3 &&
+    rec56.installments[0].amount === 500.0 &&
+    rec56.installments[1].amount === 500.0 &&
+    rec56.installments[2].amount === 500.0 &&
+    initialColStatus === 'ACTIVE' &&
+    !!col56.pixQrCodeSvg &&
+    rec56Cancelled.status === 'CANCELED' &&
+    col56Refreshed?.status === 'CANCELED',
+    '56. Desacoplamento Fisiológico entre Contas a Receber e Cobrança (PRD PARTE 06)'
+  );
+
+  // 57. Motor Matemático de Encargos, Multa e Desconto por Antecipação (PRD PARTE 06)
+  // Título de R$ 1.000,00 vencido há 10 dias com juros de 1% a.m. (pro-rata die) e multa de 2%
+  const calcResult = ReceivableCalculationService.calculate({
+    originalAmount: 1000.0,
+    dueDate: '2026-09-11',
+    referenceDate: '2026-09-21',
+    interestValue: 1.0, // 1% ao mês
+    fineValue: 2.0,     // 2% de multa fixa
+  });
+
+  // Juros diários: (1000 * 0.01 / 30) * 10 = 3.33
+  // Multa: 1000 * 0.02 = 20.00
+  // Total devido: 1023.33
+  assert(
+    calcResult.interestAmount === 3.33 &&
+    calcResult.fineAmount === 20.0 &&
+    calcResult.overdueDays === 10 &&
+    calcResult.currentAmount === 1023.33,
+    '57. Motor Matemático de Encargos, Multa e Desconto por Antecipação (PRD PARTE 06)'
+  );
+
+  // 58. Multi-Gateway Adapters e Provedores Plugáveis (PRD PARTE 06)
+  const providers = dbEngine.listPaymentProviders(alfa.schemaNamespace);
+  const defaultProv = providers.find((p) => p.isDefault);
+
+  const asaasProv = dbEngine.createPaymentProvider(
+    alfa.schemaNamespace,
+    {
+      name: 'Asaas Conta Corporativa',
+      providerType: 'ASAAS',
+      environment: 'SANDBOX',
+      supportedMethods: ['PIX', 'BOLETO', 'CREDIT_CARD'],
+      credentials: { apiKey: '$aact_YTU1YTE0M2M2N2I4MTliNzk0YTI5N2U5MzdjNWZmNDQ=' },
+      accountInfo: { pixKey: '12.345.678/0001-95' },
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+
+  const testConn = await dbEngine.testPaymentProviderConnection(
+    alfa.schemaNamespace,
+    asaasProv.id,
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+
+  const recBoleto = dbEngine.createReceivable(
+    alfa.schemaNamespace,
+    {
+      customerId: 'cli-beta-tech',
+      customerName: 'Beta Tecnologia e Varejo',
+      customerDocument: '98765432000110',
+      totalAmount: 850.0,
+      issueDate: '2026-09-21',
+      dueDate: '2026-10-10',
+      description: 'Licenciamento de Software Empresarial',
+      category: 'LICENCIAMENTO',
+      paymentTerms: 'A_VISTA',
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+
+  const colBoleto = await dbEngine.createCollection(
+    alfa.schemaNamespace,
+    {
+      receivableId: recBoleto.id,
+      method: 'BOLETO',
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+
+  assert(
+    !!defaultProv &&
+    asaasProv.providerType === 'ASAAS' &&
+    testConn.success === true &&
+    testConn.latencyMs > 0 &&
+    colBoleto.method === 'BOLETO' &&
+    colBoleto.barcode?.length === 44 &&
+    colBoleto.digitableLine?.replace(/\D/g, '').length === 47,
+    '58. Multi-Gateway Adapters e Provedores Plugáveis (PRD PARTE 06)'
+  );
+
+  // 59. Webhook Idempotente com Baixa Automática e Conciliação em Tempo Real (PRD PARTE 06)
+  const recWebhook = dbEngine.createReceivable(
+    alfa.schemaNamespace,
+    {
+      customerId: 'cli-lojas-unidas',
+      customerName: 'Lojas Unidas do Brasil S.A.',
+      customerDocument: '33000167000101',
+      totalAmount: 350.0,
+      issueDate: '2026-09-21',
+      dueDate: '2026-09-30',
+      description: 'Venda de Certificados Digitais A1',
+      category: 'VENDAS',
+      paymentTerms: 'A_VISTA',
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+
+  const colWebhook = await dbEngine.createCollection(
+    alfa.schemaNamespace,
+    {
+      receivableId: recWebhook.id,
+      method: 'PIX',
+    },
+    { id: 'usr-carlos-alfa-01', name: 'Carlos Santos' }
+  );
+
+  // Disparo do primeiro webhook do gateway simulando liquidação
+  const webhookPayload = {
+    eventId: 'evt_pix_settled_998877',
+    event: 'PAYMENT_RECEIVED',
+    payment: {
+      id: colWebhook.externalId,
+      status: 'CONFIRMED',
+      value: 350.0,
+      netValue: 348.5,
+      paymentDate: '2026-09-21T10:30:00Z',
+      billingType: 'PIX',
+    },
+  };
+
+  const webhookResult1 = await dbEngine.processWebhookPayment(
+    'ENLACE_SANDBOX',
+    webhookPayload,
+    { 'x-webhook-signature': 'sig-test-valid' }
+  );
+
+  const recAfterWebhook = dbEngine.getReceivable(alfa.schemaNamespace, recWebhook.id)!;
+  const colAfterWebhook = dbEngine.getCollection(alfa.schemaNamespace, colWebhook.id)!;
+  const paymentsAfter = dbEngine.listPaymentsV2(alfa.schemaNamespace, {
+    receivableId: recWebhook.id,
+  });
+
+  // Re-envio do mesmo webhook (teste de idempotência estrita)
+  const webhookResult2 = await dbEngine.processWebhookPayment(
+    'ENLACE_SANDBOX',
+    webhookPayload,
+    { 'x-webhook-signature': 'sig-test-valid' }
+  );
+
+  const paymentsAfterDuplicate = dbEngine.listPaymentsV2(alfa.schemaNamespace, {
+    receivableId: recWebhook.id,
+  });
+
+  assert(
+    webhookResult1.status === 'PROCESSED' &&
+    colAfterWebhook.status === 'PAID' &&
+    recAfterWebhook.status === 'PAID' &&
+    recAfterWebhook.paidAmount === 350.0 &&
+    paymentsAfter.length === 1 &&
+    webhookResult2.status === 'DUPLICATE' &&
+    paymentsAfterDuplicate.length === 1,
+    '59. Webhook Idempotente com Baixa Automática e Conciliação em Tempo Real (PRD PARTE 06)'
+  );
+
+  // 60. Isolamento Estrito Multi-Tenant de Contas a Receber e Gateways (PRD 01 & PRD PARTE 06)
+  const alfaReceivables = dbEngine.listReceivables(alfa.schemaNamespace);
+  const betaReceivables = dbEngine.listReceivables(beta.schemaNamespace);
+  const alfaCollections = dbEngine.listCollections(alfa.schemaNamespace);
+  const betaCollections = dbEngine.listCollections(beta.schemaNamespace);
+  const crossLookup = dbEngine.getReceivable(beta.schemaNamespace, recWebhook.id);
+
+  assert(
+    alfaReceivables.length > 0 &&
+    betaReceivables.length === 0 &&
+    alfaCollections.length > 0 &&
+    betaCollections.length === 0 &&
+    crossLookup === undefined,
+    '60. Isolamento Estrito Multi-Tenant de Contas a Receber e Gateways (PRD 01 & PRD PARTE 06)'
   );
 
   console.log('\n================================================================');

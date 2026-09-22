@@ -99,3 +99,19 @@ pg_restore -h localhost -U enlace_user -d enlace_erp \
 - **Healthcheck HTTP**: Configure seu load balancer ou orquestrador para sondar periodicamente:
   `GET /api/health`
   - Resposta esperada: `200 OK` com `status: "ok"`.
+
+---
+
+## 6. Configuração de Gateways de Pagamento & Webhooks (PRD PARTE 06)
+
+### 6.1 Ingestão de Webhooks
+Os gateways bancários (Asaas, C6 Bank, Cora, Enlace Sandbox) enviam notificações assíncronas de liquidação de boletos e Pix para:
+```
+POST https://seu-dominio.com.br/api/webhooks/collections/:provider
+```
+Onde `:provider` corresponde ao provedor configurado (`asaas`, `c6`, `cora`, `enlace`).
+
+### 6.2 Validação de Assinatura & Idempotência
+- Cada requisição de webhook é inspecionada quanto ao cabeçalho `x-webhook-signature` ou `x-webhook-secret`.
+- O payload é deduplicado por identificador/hash de evento na tabela `webhook_events_v2` de cada tenant.
+- Se o gateway reenviar a notificação devido a timeout de rede, o Enlace ERP responde `200 OK` com status `DUPLICATE` sem efetuar lançamentos repetidos no contas a receber ou na tesouraria.

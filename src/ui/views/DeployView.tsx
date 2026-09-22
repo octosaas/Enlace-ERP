@@ -155,6 +155,19 @@ pg_restore -h localhost -U enlace -d enlace_erp \\
   --schema=${activeSchema} \\
   backup_${activeSchema}_20260921.dump`;
 
+  const WEBHOOK_CONFIG_SNIPPET = `# 1. URL do Endpoint de Ingestão de Webhooks
+# Rota pública acessível pelos Gateways (Asaas, C6, Cora, Enlace Sandbox):
+POST /api/webhooks/collections/:provider
+
+# 2. Cabeçalhos suportados para Verificação e Auditoria
+x-webhook-signature: <hash_hmac_ou_token_de_autenticacao>
+x-webhook-secret: <segredo_configurado_no_portal_do_gateway>
+
+# 3. Respostas Padronizadas do Enlace ERP
+# 200 OK -> {"success": true, "status": "PROCESSED", "collectionId": "col-...", "receivableId": "rec-..."}
+# 200 OK -> {"success": true, "status": "DUPLICATE", "message": "Evento ja processado anteriormente."}
+# 400 Bad Request / 401 Unauthorized -> {"error": "..."}`;
+
   return (
     <div className="space-y-6">
       {/* Cabeçalho */}
@@ -253,9 +266,9 @@ pg_restore -h localhost -U enlace -d enlace_erp \\
           <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3 flex items-start gap-2.5">
             <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
             <div>
-              <div className="font-semibold text-slate-200">55/55 Testes Automatizados</div>
+              <div className="font-semibold text-slate-200">60/60 Testes Automatizados</div>
               <div className="text-slate-400 text-[11px] mt-0.5">
-                Suíte de testes de isolamento e regras de negócio PRD 01 a 09 100% aprovada.
+                Suíte de testes de isolamento e regras de negócio PRD 01 a 09 & P06 100% aprovada.
               </div>
             </div>
           </div>
@@ -266,6 +279,16 @@ pg_restore -h localhost -U enlace -d enlace_erp \\
               <div className="font-semibold text-slate-200">Anti-Brute Force & Rate Limiting</div>
               <div className="text-slate-400 text-[11px] mt-0.5">
                 Proteção de endpoints de login, recuperação de senha e rotação de Refresh Token.
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3 flex items-start gap-2.5">
+            <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-semibold text-slate-200">Webhooks de Pagamento Idempotentes</div>
+              <div className="text-slate-400 text-[11px] mt-0.5">
+                Ingestão /api/webhooks/collections/:provider com deduplicação e liquidação automática.
               </div>
             </div>
           </div>
@@ -404,6 +427,38 @@ pg_restore -h localhost -U enlace -d enlace_erp \\
             {BACKUP_SCHEMA_SNIPPET}
           </pre>
         </div>
+      </div>
+
+      {/* Seção de Webhooks & Gateways de Cobrança (PRD PARTE 06) */}
+      <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5 space-y-3">
+        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+          <div className="flex items-center gap-2">
+            <Activity className="h-4 w-4 text-emerald-400" />
+            <h3 className="text-sm font-bold text-white">Ingestão de Webhooks de Gateways (PRD PARTE 06)</h3>
+          </div>
+          <button
+            onClick={() => copyToClipboard(WEBHOOK_CONFIG_SNIPPET, 'webhook-config')}
+            className="flex items-center gap-1 text-[11px] font-medium text-slate-300 hover:text-white bg-slate-800 px-2 py-1 rounded"
+          >
+            {copiedSection === 'webhook-config' ? (
+              <>
+                <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                Copiado!
+              </>
+            ) : (
+              <>
+                <Copy className="h-3 w-3" />
+                Copiar Configuração
+              </>
+            )}
+          </button>
+        </div>
+        <p className="text-xs text-slate-400">
+          Endpoint unificado para recepção de eventos assíncronos de liquidação de boletos e Pix dos gateways integrados (Asaas, C6 Bank, Cora, Enlace Sandbox), com validação de assinatura, controle rigoroso de concorrência e idempotência nativa:
+        </p>
+        <pre className="rounded-lg border border-slate-800 bg-slate-950 p-3 font-mono text-[11px] text-slate-300 overflow-x-auto leading-relaxed">
+          {WEBHOOK_CONFIG_SNIPPET}
+        </pre>
       </div>
     </div>
   );

@@ -32,16 +32,27 @@ import {
   Banknote,
   HelpCircle,
   Rocket,
+  Search,
 } from 'lucide-react';
 
 interface NavbarProps {
   currentTab: string;
   onTabChange: (tab: string) => void;
   onSwitchCompany: () => void;
+  onOpenCommandPalette?: () => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ currentTab, onTabChange, onSwitchCompany }) => {
+export const Navbar: React.FC<NavbarProps> = ({
+  currentTab,
+  onTabChange,
+  onSwitchCompany,
+  onOpenCommandPalette,
+}) => {
   const { user, activeCompany, activeMembership, activeSchema, logout, companies } = useAuth();
+  const isMac =
+    typeof window !== 'undefined' &&
+    window.navigator &&
+    /Mac|iPod|iPhone|iPad/.test(window.navigator.platform);
 
   const getRoleBadgeStyle = (role?: string) => {
     switch (role) {
@@ -96,6 +107,22 @@ export const Navbar: React.FC<NavbarProps> = ({ currentTab, onTabChange, onSwitc
             <p className="text-[11px] text-slate-400">Multi-Tenant • Comercial, Estoque, Fiscal, Compras & Cobrança Bancária</p>
           </div>
         </div>
+
+        {/* Botão de Busca Rápida / Command Palette (Spotlight) */}
+        <button
+          id="nav-spotlight-search-btn"
+          onClick={onOpenCommandPalette}
+          className="flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/90 px-3 py-1.5 text-xs text-slate-400 hover:border-emerald-500/50 hover:text-slate-200 hover:bg-slate-800/80 transition-all shadow-sm group"
+          title="Abrir Busca Spotlight e Paleta de Comandos (Cmd+K / Ctrl+K)"
+        >
+          <Search className="h-3.5 w-3.5 text-emerald-400 group-hover:text-emerald-300 transition-colors" />
+          <span className="hidden xl:inline text-slate-300">Buscar módulos, clientes, vendas, NF-e...</span>
+          <span className="hidden sm:inline xl:hidden text-slate-300">Buscar no ERP...</span>
+          <span className="inline sm:hidden text-slate-300">Buscar</span>
+          <kbd className="hidden sm:inline-flex items-center rounded border border-slate-800 bg-slate-950 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-slate-400 group-hover:border-slate-700 group-hover:text-slate-300">
+            {isMac ? '⌘K' : 'Ctrl+K'}
+          </kbd>
+        </button>
 
         {/* Empresa Ativa & Schema Isolado */}
         {activeCompany && (

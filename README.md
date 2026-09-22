@@ -4,14 +4,14 @@
 [![React](https://img.shields.io/badge/React-19-61dafb.svg)](https://react.dev/)
 [![Node.js](https://img.shields.io/badge/Node.js-22-green.svg)](https://nodejs.org/)
 [![TailwindCSS](https://img.shields.io/badge/Tailwind-v4-38bdf8.svg)](https://tailwindcss.com/)
-[![Testes](https://img.shields.io/badge/Testes-55%2F55%20Aprovados-emerald.svg)](./tests/isolation.test.ts)
+[![Testes](https://img.shields.io/badge/Testes-60%2F60%20Aprovados-emerald.svg)](./tests/isolation.test.ts)
 [![Segurança](https://img.shields.io/badge/Isolamento-Schema%20por%20CNPJ-success.svg)](./docs/ARCHITECTURE.md)
 
 O **Enlace ERP** é uma plataforma horizontal de gestão empresarial (Enterprise Resource Planning) desenvolvida para o mercado brasileiro, combinando alta segurança, conformidade fiscal estrita e isolamento físico/lógico de dados corporativos entre múltiplos CNPJs contratantes.
 
 ---
 
-## 🚀 Módulos Implementados e Homologados (PRD 01 a 09)
+## 🚀 Módulos Implementados e Homologados (PRD 01 a 09 & PRD PARTE 06)
 
 | PRD | Módulo / Domínio | Principais Recursos Implementados |
 |---|---|---|
@@ -24,6 +24,7 @@ O **Enlace ERP** é uma plataforma horizontal de gestão empresarial (Enterprise
 | **PRD 07** | **Fiscal, NF-e & SEFAZ** | Emissor de NF-e (Modelo 55) v4.00, motor tributário (ICMS, IPI, PIS, COFINS), assinatura digital padrão XMLDSig, transmissão e protocolo SEFAZ imutável e inutilização de faixas. |
 | **PRD 08** | **Compras & Suprimentos** | Requisições de compra com alçadas de aprovação e centro de custos, cotações com mapa comparativo de fornecedores e cálculo de saving, e conferência 3-Way Matching com importação de XML. |
 | **PRD 09** | **Cobrança Bancária, CNAB & Pix** | Emissão de boletos FEBRABAN com código de barras de 44 dígitos e linha digitável, remessa e retorno CNAB 400 com baixa automática de títulos, Pix dinâmico com payload EMV e QR Code vetorial, simulador Bacen SPI e régua de cobrança (*dunning*). |
+| **PRD P06** | **Cobrança & Contas a Receber** | Desacoplamento fisiológico (Receivables x Collections), motor de cálculo de juros diários/multa/desconto, gateways plugáveis (Asaas, C6, Cora, Enlace), webhooks idempotentes com conciliação e baixa em tempo real. |
 
 ---
 
@@ -86,9 +87,9 @@ Acesse a aplicação no navegador em: `http://localhost:3000`.
 
 ---
 
-## 🧪 Bateria de Testes Automatizados (55/55 Aprovados)
+## 🧪 Bateria de Testes Automatizados (60/60 Aprovados)
 
-O Enlace ERP conta com **55 testes automatizados de ponta a ponta** que garantem conformidade com todas as regras de negócio dos PRDs 01 a 09:
+O Enlace ERP conta com **60 testes automatizados de ponta a ponta** que garantem conformidade com todas as regras de negócio dos PRDs 01 a 09 e PRD PARTE 06:
 
 ```bash
 # Executar a bateria de testes de isolamento e regras de negócio

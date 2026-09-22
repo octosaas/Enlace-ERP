@@ -20,6 +20,7 @@ import {
   Landmark,
   Truck,
   Banknote,
+  CreditCard,
   LifeBuoy,
   MessageSquare,
   ExternalLink,
@@ -99,6 +100,30 @@ const FAQ_DATA: FAQItem[] = [
     question: 'Como processar o arquivo de Retorno CNAB 400 do banco?',
     answer:
       'No módulo "Cobrança & Pix", na aba "Retorno CNAB", faça o upload do arquivo .RET disponibilizado pelo seu banco. O motor identifica os boletos liquidados pelo "Nosso Número", efetua a baixa automática das duplicatas e credita o saldo em tesouraria.',
+  },
+  {
+    category: 'Cobrança & Contas a Receber (P06)',
+    question: 'Qual a diferença entre Contas a Receber (Receivables) e Cobranças (Collections)?',
+    answer:
+      'Existe um desacoplamento fisiológico estrito: o Título a Receber representa o direito creditório contratual imutável, enquanto a Cobrança é o meio efêmero de liquidação. Um único recebível pode ter múltiplos boletos ou Pix emitidos e cancelados por diferentes gateways sem alterar a identidade da dívida.',
+  },
+  {
+    category: 'Cobrança & Contas a Receber (P06)',
+    question: 'Como funcionam os Gateways de Pagamento Plugáveis (Asaas, C6, Cora, Enlace Sandbox)?',
+    answer:
+      'O Enlace ERP utiliza o padrão Adapter onde cada instituição financeira possui credenciais, chaves de API e segredos de webhook isolados no schema do CNPJ contratante (payment_providers_v2). O motor permite alternar de gateway ou usar fallback automático sem perda de histórico.',
+  },
+  {
+    category: 'Cobrança & Contas a Receber (P06)',
+    question: 'Como é calculado o valor atualizado com encargos, multa e desconto?',
+    answer:
+      'O motor de cálculo financeiro pro-rata die aplica juros simples ou compostos por dia corrido de atraso, multa percentual ou fixa contratual, e desconta bônus de pontualidade se o pagamento ocorrer antes da data de corte configurada.',
+  },
+  {
+    category: 'Cobrança & Contas a Receber (P06)',
+    question: 'Como o webhook de pagamento garante que não haverá duplicidade de liquidação?',
+    answer:
+      'Cada notificação de gateway recebida em /api/webhooks/collections/:provider passa por registro em webhook_events_v2 com hash/id único e verificação de assinatura. Se o gateway reenviar o mesmo evento, o sistema identifica status DUPLICATE e preserva a idempotência sem criar pagamentos adicionais.',
   },
 ];
 
@@ -268,6 +293,26 @@ const MODULE_GUIDES: ModuleGuide[] = [
       '3. O arquivo de retorno do banco ou webhook do Pix liquida o título automaticamente.',
     ],
   },
+  {
+    id: 'prd_p06',
+    title: 'Cobrança & Contas a Receber (P06)',
+    prd: 'PRD PARTE 06',
+    icon: <CreditCard className="h-5 w-5 text-emerald-400" />,
+    summary:
+      'Arquitetura desacoplada de contas a receber e cobrança com múltiplos gateways plugáveis (Asaas, C6 Bank, Cora, Enlace Sandbox), cálculo automatizado de encargos moratórios, multas e descontos de pontualidade, e webhooks idempotentes com liquidação em tempo real.',
+    keyFeatures: [
+      'Desacoplamento Fisiológico: 1 Título (Receivable) x N Cobranças (Collections)',
+      'Multi-Gateway Plugável: Adapters para Asaas, C6 Bank, Cora e Enlace Sandbox',
+      'Motor de Encargos: Juros de mora pro-rata die diários, multa e desconto por antecipação',
+      'Webhooks Idempotentes com deduplicação e liquidação automática em lote ou instantânea',
+      'Isolamento estrito multi-tenant de cobranças e credenciais por schema de CNPJ',
+    ],
+    workflow: [
+      '1. Vendas e contratos geram Títulos a Receber (Receivables) no schema do CNPJ.',
+      '2. O operador ou rotina emite Cobrança (Collection) via gateway configurado (Boleto/Pix).',
+      '3. O gateway processa o pagamento e envia webhook assinado com baixa automática e idempotente.',
+    ],
+  },
 ];
 
 export const HelpView: React.FC = () => {
@@ -368,7 +413,7 @@ export const HelpView: React.FC = () => {
               <BookOpen className="h-3.5 w-3.5 text-emerald-400" />
               Manuais dos Módulos
             </span>
-            <span className="text-[11px] text-slate-500">8 Manuais</span>
+            <span className="text-[11px] text-slate-500">9 Manuais</span>
           </div>
 
           <div className="space-y-1">

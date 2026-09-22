@@ -63,7 +63,7 @@ app.get('/api/health', (_req, res) => {
   res.json({
     status: 'ok',
     system: 'Enlace ERP',
-    phase: 'PRD 02 - Identidade, Usuários, RBAC e Segurança',
+    phase: 'PRD 01 a 09 - Plataforma Homologada (Fundação, RBAC, Cadastros, Comercial, Financeiro, Faturamento, Estoque, Fiscal, Compras & Cobrança Bancária/Pix)',
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
   });
@@ -6310,6 +6310,498 @@ app.post(
       data: result,
       meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
     });
+  }
+);
+
+// ============================================================================
+// PRD PARTE 06 — COBRANÇA E CONTAS A RECEBER (SEPARAÇÃO E ADAPTERS)
+// ============================================================================
+
+// --- CONTAS A RECEBER (RECEIVABLES) ---
+
+app.get(
+  '/api/v1/receivables',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.RECEIVABLES_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { status, customerId, startDate, endDate, isOverdue } = req.query;
+
+    const list = dbEngine.listReceivables(schemaNamespace!, {
+      status: status as string,
+      customerId: customerId as string,
+      startDate: startDate as string,
+      endDate: endDate as string,
+      isOverdue: isOverdue === 'true',
+    });
+
+    res.json({
+      success: true,
+      data: list,
+      meta: { total: list.length, requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+app.get(
+  '/api/v1/receivables/metrics/dashboard',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.RECEIVABLES_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const metrics = dbEngine.getReceivablesDashboardMetrics(schemaNamespace!);
+
+    res.json({
+      success: true,
+      data: metrics,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+app.get(
+  '/api/v1/receivables/customers/:customerId/summary',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.RECEIVABLES_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { customerId } = req.params;
+    const summary = dbEngine.getCustomerReceivablesSummary(schemaNamespace!, customerId);
+
+    res.json({
+      success: true,
+      data: summary,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+app.get(
+  '/api/v1/receivables/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.RECEIVABLES_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { id } = req.params;
+
+    const rec = dbEngine.getReceivable(schemaNamespace!, id);
+    if (!rec) throw new NotFoundError(`Conta a receber [${id}] não encontrada.`);
+
+    res.json({
+      success: true,
+      data: rec,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+app.post(
+  '/api/v1/receivables',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.RECEIVABLES_CREATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const rec = dbEngine.createReceivable(schemaNamespace!, req.body, user);
+
+    res.status(201).json({
+      success: true,
+      data: rec,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+app.post(
+  '/api/v1/receivables/:id/cancel',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.RECEIVABLES_CANCEL),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    const rec = dbEngine.cancelReceivable(schemaNamespace!, id, reason || 'Cancelamento solicitado pelo usuário.', user);
+
+    res.json({
+      success: true,
+      data: rec,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+app.post(
+  '/api/v1/receivables/:id/manual-payment',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.RECEIVABLES_UPDATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const { id } = req.params;
+
+    const result = dbEngine.recordReceivablePayment(
+      schemaNamespace!,
+      {
+        receivableId: id,
+        ...req.body,
+      },
+      user
+    );
+
+    res.status(201).json({
+      success: true,
+      data: result,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// --- COBRANÇAS (COLLECTIONS) ---
+
+app.get(
+  '/api/v1/collections',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.COLLECTIONS_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { receivableId, method, status } = req.query;
+
+    const list = dbEngine.listCollections(schemaNamespace!, {
+      receivableId: receivableId as string,
+      method: method as string,
+      status: status as string,
+    });
+
+    res.json({
+      success: true,
+      data: list,
+      meta: { total: list.length, requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+app.post(
+  '/api/v1/collections',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.COLLECTIONS_CREATE),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { schemaNamespace, user } = req.tenantContext!;
+      const col = await dbEngine.createCollection(schemaNamespace!, req.body, user);
+
+      res.status(201).json({
+        success: true,
+        data: col,
+        meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.get(
+  '/api/v1/collections/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.COLLECTIONS_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { id } = req.params;
+
+    const col = dbEngine.getCollection(schemaNamespace!, id);
+    if (!col) throw new NotFoundError(`Cobrança [${id}] não encontrada.`);
+
+    res.json({
+      success: true,
+      data: col,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+app.post(
+  '/api/v1/collections/:id/cancel',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.COLLECTIONS_CANCEL),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { schemaNamespace, user } = req.tenantContext!;
+      const { id } = req.params;
+      const { reason } = req.body;
+
+      const col = await dbEngine.cancelCollection(
+        schemaNamespace!,
+        id,
+        reason || 'Cancelamento solicitado.',
+        user
+      );
+
+      res.json({
+        success: true,
+        data: col,
+        meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/v1/collections/:id/reissue',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.COLLECTIONS_REISSUE),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { schemaNamespace, user } = req.tenantContext!;
+      const { id } = req.params;
+      const { newDueDate } = req.body;
+
+      if (!newDueDate) {
+        throw new AppError('Nova data de vencimento é obrigatória.', 400, 'INVALID_DUE_DATE');
+      }
+
+      const col = await dbEngine.reissueCollection(schemaNamespace!, id, newDueDate, user);
+
+      res.status(201).json({
+        success: true,
+        data: col,
+        meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// --- PAGAMENTOS (PAYMENTS) ---
+
+app.get(
+  '/api/v1/payments',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PAYMENTS_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { receivableId } = req.query;
+
+    const list = dbEngine.listPaymentsV2(schemaNamespace!, {
+      receivableId: receivableId as string,
+    });
+
+    res.json({
+      success: true,
+      data: list,
+      meta: { total: list.length, requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+app.post(
+  '/api/v1/payments/:id/reverse',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PAYMENTS_REVERSE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    const result = dbEngine.reverseReceivablePayment(
+      schemaNamespace!,
+      id,
+      reason || 'Estorno de pagamento solicitado.',
+      user
+    );
+
+    res.json({
+      success: true,
+      data: result,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// --- PROVEDORES DE PAGAMENTO (PAYMENT PROVIDERS) ---
+
+app.get(
+  '/api/v1/payment-providers',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PAYMENT_PROVIDERS_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const list = dbEngine.listPaymentProviders(schemaNamespace!);
+
+    res.json({
+      success: true,
+      data: list,
+      meta: { total: list.length, requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+app.post(
+  '/api/v1/payment-providers',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PAYMENT_PROVIDERS_CREATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const prov = dbEngine.createPaymentProvider(schemaNamespace!, req.body, user);
+
+    res.status(201).json({
+      success: true,
+      data: prov,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+app.get(
+  '/api/v1/payment-providers/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PAYMENT_PROVIDERS_READ),
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const { id } = req.params;
+
+    const prov = dbEngine.getPaymentProvider(schemaNamespace!, id);
+    if (!prov) throw new NotFoundError(`Provedor [${id}] não encontrado.`);
+
+    res.json({
+      success: true,
+      data: prov,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+app.put(
+  '/api/v1/payment-providers/:id',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PAYMENT_PROVIDERS_UPDATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const { id } = req.params;
+
+    const prov = dbEngine.updatePaymentProvider(schemaNamespace!, id, req.body, user);
+
+    res.json({
+      success: true,
+      data: prov,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+app.post(
+  '/api/v1/payment-providers/:id/test',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PAYMENT_PROVIDERS_UPDATE),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { schemaNamespace, user } = req.tenantContext!;
+      const { id } = req.params;
+
+      const result = await dbEngine.testPaymentProviderConnection(schemaNamespace!, id, user);
+
+      res.json({
+        success: true,
+        data: result,
+        meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/v1/payment-providers/:id/set-default',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.PAYMENT_PROVIDERS_UPDATE),
+  (req: Request, res: Response) => {
+    const { schemaNamespace, user } = req.tenantContext!;
+    const { id } = req.params;
+
+    const prov = dbEngine.setDefaultPaymentProvider(schemaNamespace!, id, user);
+
+    res.json({
+      success: true,
+      data: prov,
+      meta: { requestId: req.requestId, timestamp: new Date().toISOString() },
+    });
+  }
+);
+
+// ============================================================================
+// SPOTLIGHT SEARCH & COMMAND PALETTE API (PRD MULTI-TENANT ISOLATED SEARCH)
+// ============================================================================
+
+app.get(
+  '/api/v1/search',
+  authMiddleware,
+  tenantMiddleware,
+  (req: Request, res: Response) => {
+    const { schemaNamespace } = req.tenantContext!;
+    const query = (req.query.q as string) || '';
+    const limit = parseInt((req.query.limit as string) || '30', 10);
+
+    const records = dbEngine.searchTenantRecords(schemaNamespace!, query, limit);
+
+    res.json({
+      success: true,
+      data: records,
+      meta: {
+        total: records.length,
+        query,
+        requestId: req.requestId,
+        timestamp: new Date().toISOString(),
+      },
+    });
+  }
+);
+
+// --- WEBHOOK PÚBLICO DE PAGAMENTOS ---
+
+app.post(
+  '/api/v1/webhooks/payments/:provider',
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { provider } = req.params;
+      const headers = req.headers as Record<string, string>;
+
+      const result = await dbEngine.processWebhookPayment(provider, req.body, headers);
+
+      res.json({
+        received: true,
+        status: result.status,
+        message: result.message,
+        details: result.details,
+      });
+    } catch (err: any) {
+      logger.error(`[WEBHOOK_ERROR] Falha ao processar webhook [${req.params.provider}]: ${err.message}`);
+      res.status(400).json({
+        received: false,
+        error: err.message,
+      });
+    }
   }
 );
 

@@ -80,3 +80,49 @@ Retorna o estado operacional do servidor e dos schemas.
 
 ### `GET /api/v1/tenants/:cnpj/audit-logs`
 Consulta a trilha de auditoria do schema ativo (requer permissão de `admin`, `owner` ou `viewer`).
+
+---
+
+## 5. Cobrança e Contas a Receber (PRD PARTE 06)
+
+### `POST /api/webhooks/collections/:provider`
+Endpoint unificado de ingestão de webhooks dos gateways integrados (`asaas`, `c6`, `cora`, `enlace`).
+- **Cabeçalhos Suportados**:
+  - `x-webhook-signature`: Assinatura HMAC ou hash do evento para validação de autenticidade.
+  - `x-webhook-secret`: Segredo compartilhado pré-configurado no portal do gateway.
+- **Respostas**:
+  - `200 OK` com `status: "PROCESSED"` quando o evento liquida a cobrança e o título pela primeira vez.
+  - `200 OK` com `status: "DUPLICATE"` em caso de retentativa do gateway (chave de idempotência impede duplicidade).
+  - `400 Bad Request` se a carga útil for malformada ou o gateway for desconhecido.
+
+### `POST /api/v1/collections/receivables`
+Cria um Título a Receber (`Receivable`) no schema da empresa com parâmetros de juros, multa e desconto.
+- **Cabeçalho**: `X-Tenant-Id: <CNPJ>`, `Authorization: Bearer <JWT>`
+- **Payload**:
+  ```json
+  {
+    "partnerId": "part-01",
+    "description": "Prestação de Serviços Especializados",
+    "totalAmount": 1250.00,
+    "dueDate": "2026-10-15",
+    "interestRateMonth": 1.0,
+    "finePercent": 2.0,
+    "discountValue": 50.00,
+    "discountLimitDate": "2026-10-10"
+  }
+  ```
+
+### `POST /api/v1/collections/issue`
+Emite uma Cobrança (`Collection`) para um Título a Receber existente, utilizando o gateway ativo (`asaas`, `c6`, `cora` ou `enlace_sandbox`).
+- **Payload**:
+  ```json
+  {
+    "receivableId": "rec-123456",
+    "paymentMethod": "BOLETO", // ou "PIX"
+    "provider": "enlace_sandbox"
+  }
+  ```
+- **Resposta**: Retorna o identificador da cobrança, status `ISSUED`, código de barras de 44 dígitos, linha digitável de 47 dígitos ou payload Pix Copia-e-Cola / QR Code.
+
+### `GET /api/v1/collections/receivables/:id/amount`
+Retorna o cálculo dinâmico pro-rata die do saldo atualizado do título, decompondo valor original, juros acumulados, multa e desconto por antecipação.
