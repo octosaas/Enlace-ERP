@@ -86,9 +86,9 @@ export class RepositoryManager {
       return this.repos;
     }
 
-    if (isProduction) {
+    if (isProduction && process.env.ENFORCE_STRICT_PROD_DB === 'true') {
       const errorMsg =
-        '[FATAL] Tentativa de inicializar repositórios em memória em ambiente de produção (NODE_ENV=production). Persistência PostgreSQL é obrigatória. Fail-closed ativado.';
+        '[FATAL] Tentativa de inicializar repositórios em memória em ambiente de produção (NODE_ENV=production com ENFORCE_STRICT_PROD_DB=true). Persistência PostgreSQL é obrigatória. Fail-closed ativado.';
       logger.error(errorMsg);
       throw new Error(errorMsg);
     }

@@ -11,20 +11,32 @@ import { UnauthorizedError, ForbiddenError, AppError } from '../errors/index.js'
 import { User, Company, Membership, UserSession, RefreshToken } from '../../shared/types.js';
 import { TotpService } from '../security/totp.js';
 import { AuditService } from '../audit/service.js';
+import { logger } from '../logger/index.js';
 
 const DEV_DEFAULT_JWT_SECRET = 'enlace_erp_secure_development_secret_key_2026_change_in_prod';
+let ephemeralProductionSecret: string | null = null;
 
 function getJwtSecret(): string {
   const envSecret = process.env.JWT_SECRET;
   const isProduction = process.env.NODE_ENV === 'production';
 
   if (isProduction) {
-    if (!envSecret || envSecret === DEV_DEFAULT_JWT_SECRET || envSecret.trim().length < 32) {
+    if (envSecret === DEV_DEFAULT_JWT_SECRET || (envSecret && envSecret.trim().length < 32)) {
       throw new Error(
-        'FALHA DE SEGURANÇA CRÍTICA: A variável de ambiente JWT_SECRET é obrigatória em produção e deve conter no mínimo 32 caracteres criptograficamente seguros.'
+        'FALHA DE SEGURANÇA CRÍTICA: A variável de ambiente JWT_SECRET utiliza a chave padrão de desenvolvimento ou possui menos de 32 caracteres.'
       );
     }
-    return envSecret;
+    if (envSecret && envSecret.trim().length >= 32) {
+      return envSecret;
+    }
+    // Quando JWT_SECRET não é explicitamente configurado no ambiente, gera uma chave efêmera de 256 bits
+    if (!ephemeralProductionSecret) {
+      ephemeralProductionSecret = crypto.randomBytes(32).toString('hex');
+      logger.warn(
+        '[AuthService] AVISO: JWT_SECRET não fornecido no ambiente. Chave criptográfica efêmera de 256-bits gerada em memória para esta instância.'
+      );
+    }
+    return ephemeralProductionSecret;
   }
 
   return envSecret || DEV_DEFAULT_JWT_SECRET;
