@@ -200,7 +200,7 @@ export const FiscalView: React.FC = () => {
       }
 
       // Documentos de Faturamento
-      const bRes = await apiFetch<BillingDocument[]>('/api/v1/billing/documents');
+      const bRes = await apiFetch<BillingDocument[]>('/api/v1/billing');
       if (bRes.success && bRes.data) {
         setBillingDocuments(bRes.data);
       }

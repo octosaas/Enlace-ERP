@@ -32,6 +32,13 @@ export class PostgresService {
   }
 
   /**
+   * Retorna se o banco PostgreSQL está conectado
+   */
+  static isDbConnected(): boolean {
+    return this.isConnected;
+  }
+
+  /**
    * Verifica se o banco de dados PostgreSQL está ativo e conectado
    */
   static getStatus(): { isConnected: boolean; databaseUrlConfigured: boolean } {
@@ -42,7 +49,15 @@ export class PostgresService {
   }
 
   /**
+   * Permite redefinir a tentativa de conexão (útil para suíte de testes de isolamento e shutdown)
+   */
+  static resetConnectionAttempt(): void {
+    this.connectionAttempted = false;
+  }
+
+  /**
    * Inicializa o pool de conexões com PostgreSQL e valida a conexão
+   * REGRA CRÍTICA: Em NODE_ENV=production, ausência de DATABASE_URL ou falha de conexão ativa FAIL-CLOSED.
    */
   static async initialize(): Promise<boolean> {
     if (this.connectionAttempted) {
@@ -51,8 +66,15 @@ export class PostgresService {
     this.connectionAttempted = true;
 
     const databaseUrl = process.env.DATABASE_URL;
+    const isProduction = process.env.NODE_ENV === 'production';
 
     if (!databaseUrl) {
+      if (isProduction) {
+        const errorMsg =
+          '[FATAL] Configuração obrigatória DATABASE_URL ausente em ambiente de produção (NODE_ENV=production). Fail-closed ativado.';
+        logger.error(errorMsg);
+        throw new Error(errorMsg);
+      }
       logger.info(
         '[PostgresService] DATABASE_URL não configurada no ambiente. Persistência em memória operando com isolamento estrito por schema.'
       );
@@ -62,7 +84,7 @@ export class PostgresService {
     try {
       this.pool = new Pool({
         connectionString: databaseUrl,
-        max: 20,
+        max: 25,
         idleTimeoutMillis: 30000,
         connectionTimeoutMillis: 5000,
       });
@@ -84,8 +106,14 @@ export class PostgresService {
 
       return true;
     } catch (err: any) {
+      if (isProduction) {
+        const errorMsg = `[FATAL] Falha de conexão ao PostgreSQL em ambiente de produção (NODE_ENV=production): ${err.message}. Fail-closed ativado.`;
+        logger.error(errorMsg);
+        this.isConnected = false;
+        throw new Error(errorMsg);
+      }
       logger.warn(
-        `[PostgresService] Falha ao conectar ao PostgreSQL (${err.message}). Operando em modo de transição/reserva com integridade em memória.`
+        `[PostgresService] Falha ao conectar ao PostgreSQL (${err.message}). Operando em modo de testes/reserva com integridade em memória.`
       );
       this.isConnected = false;
       return false;
@@ -93,19 +121,115 @@ export class PostgresService {
   }
 
   /**
-   * Provisiona o Schema dedicado e tabelas físicas para um CNPJ (PRD 01 - Seção 5)
+   * Executa uma função com um cliente PostgreSQL vinculado ao schema do tenant ("tenant_<cleanCnpj>")
+   */
+  static async withTenantClient<T>(
+    cleanCnpj: string,
+    callback: (client: pg.PoolClient, schemaName: string) => Promise<T>
+  ): Promise<T> {
+    if (!this.pool || !this.isConnected) {
+      throw new Error('[PostgresService] Conexão PostgreSQL não está disponível para execução.');
+    }
+
+    const sanitizedCnpj = cleanCnpj.replace(/\D/g, '');
+    const schemaName = `tenant_${sanitizedCnpj}`;
+    const client = await this.pool.connect();
+
+    try {
+      await client.query(`SET search_path TO "${schemaName}", public;`);
+      return await callback(client, schemaName);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Executa uma transação atômica vinculada ao schema do tenant ("tenant_<cleanCnpj>")
+   */
+  static async withTenantTransaction<T>(
+    cleanCnpj: string,
+    callback: (client: pg.PoolClient, schemaName: string) => Promise<T>
+  ): Promise<T> {
+    if (!this.pool || !this.isConnected) {
+      throw new Error('[PostgresService] Conexão PostgreSQL não está disponível para transação.');
+    }
+
+    const sanitizedCnpj = cleanCnpj.replace(/\D/g, '');
+    const schemaName = `tenant_${sanitizedCnpj}`;
+    const client = await this.pool.connect();
+
+    try {
+      await client.query('BEGIN;');
+      await client.query(`SET search_path TO "${schemaName}", public;`);
+      const result = await callback(client, schemaName);
+      await client.query('COMMIT;');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK;');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Executa uma função com um cliente PostgreSQL vinculado ao Control Plane (schema "public")
+   */
+  static async withControlPlaneClient<T>(
+    callback: (client: pg.PoolClient) => Promise<T>
+  ): Promise<T> {
+    if (!this.pool || !this.isConnected) {
+      throw new Error('[PostgresService] Conexão PostgreSQL não está disponível para Control Plane.');
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('SET search_path TO public;');
+      return await callback(client);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Executa uma transação atômica no Control Plane (schema "public")
+   */
+  static async withControlPlaneTransaction<T>(
+    callback: (client: pg.PoolClient) => Promise<T>
+  ): Promise<T> {
+    if (!this.pool || !this.isConnected) {
+      throw new Error('[PostgresService] Conexão PostgreSQL não está disponível para transação Control Plane.');
+    }
+
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN;');
+      await client.query('SET search_path TO public;');
+      const result = await callback(client);
+      await client.query('COMMIT;');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK;');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Provisiona o Schema dedicado e tabelas físicas completas para um CNPJ (PRD 01 - Seção 5)
    * Ex: "tenant_12345678000195"
    */
   static async provisionTenantSchema(cleanCnpj: string): Promise<void> {
     if (!this.pool || !this.isConnected) return;
 
     const schemaName = `tenant_${cleanCnpj.replace(/\D/g, '')}`;
-
     const client = await this.pool.connect();
+
     try {
       await client.query(`CREATE SCHEMA IF NOT EXISTS "${schemaName}";`);
 
-      // Cria as tabelas do Tenant dentro do schema isolado
+      // Criação DDL completa de todas as tabelas e índices operacionais do Tenant
       await client.query(`
         -- 1. Configurações da Empresa
         CREATE TABLE IF NOT EXISTS "${schemaName}".company_settings (
@@ -117,7 +241,7 @@ export class PostgresService {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
-        -- 2. Trilha de Auditoria
+        -- 2. Trilha de Auditoria do Tenant
         CREATE TABLE IF NOT EXISTS "${schemaName}".audit_logs (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -133,7 +257,7 @@ export class PostgresService {
           details JSONB
         );
 
-        -- 3. Clientes e Fornecedores
+        -- 3. Clientes e Fornecedores (Parceiros de Negócio - PRD 03)
         CREATE TABLE IF NOT EXISTS "${schemaName}".partners (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           type TEXT NOT NULL,
@@ -150,7 +274,31 @@ export class PostgresService {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
-        -- 4. Produtos e Estoque (CMP)
+        -- 4. Plano de Contas Contábil (PRD 03)
+        CREATE TABLE IF NOT EXISTS "${schemaName}".chart_of_accounts (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          code TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          type TEXT NOT NULL,
+          nature TEXT NOT NULL,
+          level INT NOT NULL DEFAULT 1,
+          is_synthetic BOOLEAN NOT NULL DEFAULT false,
+          is_active BOOLEAN NOT NULL DEFAULT true,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        -- 5. Centros de Custo (PRD 03)
+        CREATE TABLE IF NOT EXISTS "${schemaName}".cost_centers (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          code TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          is_active BOOLEAN NOT NULL DEFAULT true,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        -- 6. Catálogo de Produtos e Serviços com CMP (PRD 04 & 06)
         CREATE TABLE IF NOT EXISTS "${schemaName}".products (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           code TEXT NOT NULL,
@@ -169,26 +317,7 @@ export class PostgresService {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
-        -- 5. Vendas
-        CREATE TABLE IF NOT EXISTS "${schemaName}".sales (
-          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          number TEXT NOT NULL,
-          partner_id UUID NOT NULL,
-          status TEXT NOT NULL DEFAULT 'PENDING',
-          quote_id TEXT,
-          issue_date TEXT NOT NULL,
-          delivery_date TEXT,
-          subtotal NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
-          discount NUMERIC(15, 2) DEFAULT 0.00,
-          freight NUMERIC(15, 2) DEFAULT 0.00,
-          total NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
-          items JSONB NOT NULL,
-          payment_terms JSONB,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-
-        -- 6. Orçamentos
+        -- 7. Orçamentos Comerciais (PRD 04)
         CREATE TABLE IF NOT EXISTS "${schemaName}".quotes (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           number TEXT NOT NULL,
@@ -207,7 +336,26 @@ export class PostgresService {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
-        -- 7. Ordens de Serviço
+        -- 8. Pedidos de Venda (PRD 04)
+        CREATE TABLE IF NOT EXISTS "${schemaName}".sales (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          number TEXT NOT NULL,
+          partner_id UUID NOT NULL,
+          status TEXT NOT NULL DEFAULT 'PENDING',
+          quote_id TEXT,
+          issue_date TEXT NOT NULL,
+          delivery_date TEXT,
+          subtotal NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+          discount NUMERIC(15, 2) DEFAULT 0.00,
+          freight NUMERIC(15, 2) DEFAULT 0.00,
+          total NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+          items JSONB NOT NULL,
+          payment_terms JSONB,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        -- 9. Ordens de Serviço (OS - PRD 04)
         CREATE TABLE IF NOT EXISTS "${schemaName}".service_orders (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           number TEXT NOT NULL,
@@ -224,7 +372,270 @@ export class PostgresService {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
-        -- 8. Contas a Receber (V2 Desacoplada - PRD PARTE 06)
+        -- 10. Contratos (PRD 04)
+        CREATE TABLE IF NOT EXISTS "${schemaName}".contracts (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          number TEXT NOT NULL,
+          partner_id UUID NOT NULL,
+          status TEXT NOT NULL DEFAULT 'ACTIVE',
+          start_date TEXT NOT NULL,
+          end_date TEXT,
+          monthly_amount NUMERIC(15, 2) NOT NULL,
+          billing_day INT NOT NULL DEFAULT 10,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        -- 11. Faturamento e Recorrência (PRD PARTE 05)
+        CREATE TABLE IF NOT EXISTS "${schemaName}".billing (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          instance_id TEXT NOT NULL,
+          customer_id TEXT NOT NULL,
+          customer_name TEXT NOT NULL,
+          customer_document TEXT,
+          number TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'DRAFT',
+          source_type TEXT NOT NULL DEFAULT 'MANUAL',
+          source_id TEXT,
+          source_number TEXT,
+          recurring_billing_id TEXT,
+          issue_date TEXT NOT NULL,
+          competence_start TEXT NOT NULL,
+          competence_end TEXT NOT NULL,
+          competence_label TEXT NOT NULL,
+          due_date TEXT NOT NULL,
+          subtotal NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+          discount NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+          surcharge NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+          total NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+          description TEXT,
+          notes TEXT,
+          internal_notes TEXT,
+          cancellation_reason TEXT,
+          canceled_at TIMESTAMPTZ,
+          canceled_by TEXT,
+          issued_at TIMESTAMPTZ,
+          issued_by TEXT,
+          created_by TEXT NOT NULL,
+          updated_by TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          collection_id TEXT,
+          fiscal_document_id TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS "${schemaName}".billing_items (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          billing_id UUID NOT NULL REFERENCES "${schemaName}".billing(id) ON DELETE CASCADE,
+          item_type TEXT NOT NULL DEFAULT 'SERVICE',
+          product_id TEXT,
+          service_id TEXT,
+          description TEXT NOT NULL,
+          quantity NUMERIC(15, 4) NOT NULL DEFAULT 1.0000,
+          unit_price NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+          discount NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+          surcharge NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+          total NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+          sort_order INT NOT NULL DEFAULT 0,
+          source_type TEXT,
+          source_id TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS "${schemaName}".recurring_billing (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          instance_id TEXT NOT NULL,
+          customer_id TEXT NOT NULL,
+          customer_name TEXT NOT NULL,
+          customer_document TEXT,
+          contract_id TEXT,
+          contract_number TEXT,
+          status TEXT NOT NULL DEFAULT 'ACTIVE',
+          frequency TEXT NOT NULL DEFAULT 'MONTHLY',
+          custom_interval_months TEXT,
+          start_date TEXT NOT NULL,
+          end_date TEXT,
+          next_billing_date TEXT NOT NULL,
+          day_of_month INT NOT NULL DEFAULT 10,
+          due_rule TEXT NOT NULL DEFAULT 'FIXED_DAY',
+          due_days INT NOT NULL DEFAULT 10,
+          amount NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+          description TEXT NOT NULL,
+          items JSONB NOT NULL,
+          last_generated_competence TEXT,
+          last_generated_at TIMESTAMPTZ,
+          last_generated_billing_id TEXT,
+          last_generated_billing_number TEXT,
+          last_error JSONB,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS "${schemaName}".billing_generation_logs (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          instance_id TEXT NOT NULL,
+          recurring_billing_id TEXT NOT NULL,
+          competence_start TEXT NOT NULL,
+          competence_end TEXT NOT NULL,
+          competence_label TEXT NOT NULL,
+          billing_id TEXT,
+          billing_number TEXT,
+          status TEXT NOT NULL,
+          attempt_count INT NOT NULL DEFAULT 1,
+          error_code TEXT,
+          error_message TEXT,
+          executed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          worker_id TEXT
+        );
+
+        -- 12. Estoque & WMS (PRD 06)
+        CREATE TABLE IF NOT EXISTS "${schemaName}".warehouses (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          code TEXT NOT NULL,
+          name TEXT NOT NULL,
+          is_default BOOLEAN NOT NULL DEFAULT false,
+          is_active BOOLEAN NOT NULL DEFAULT true,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS "${schemaName}".stock_items (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          warehouse_id UUID NOT NULL REFERENCES "${schemaName}".warehouses(id),
+          product_id UUID NOT NULL REFERENCES "${schemaName}".products(id),
+          quantity NUMERIC(15, 4) NOT NULL DEFAULT 0.0000,
+          cmp NUMERIC(15, 4) NOT NULL DEFAULT 0.0000,
+          min_quantity NUMERIC(15, 4) DEFAULT 0.0000,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT uk_warehouse_product UNIQUE (warehouse_id, product_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS "${schemaName}".stock_movements (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          type TEXT NOT NULL,
+          warehouse_id UUID NOT NULL REFERENCES "${schemaName}".warehouses(id),
+          product_id UUID NOT NULL REFERENCES "${schemaName}".products(id),
+          quantity NUMERIC(15, 4) NOT NULL,
+          unit_cost NUMERIC(15, 4) NOT NULL,
+          total_cost NUMERIC(15, 2) NOT NULL,
+          previous_balance NUMERIC(15, 4) NOT NULL,
+          new_balance NUMERIC(15, 4) NOT NULL,
+          previous_cmp NUMERIC(15, 4) NOT NULL,
+          new_cmp NUMERIC(15, 4) NOT NULL,
+          document_type TEXT,
+          document_id TEXT,
+          notes TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        -- 13. Módulo Fiscal & NF-e Modelo 55 (PRD 07)
+        CREATE TABLE IF NOT EXISTS "${schemaName}".fiscal_documents (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          model TEXT NOT NULL,
+          series TEXT NOT NULL,
+          number TEXT NOT NULL,
+          type TEXT NOT NULL,
+          nature_of_operation TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'DRAFT',
+          access_key TEXT UNIQUE,
+          protocol_number TEXT,
+          partner_name TEXT NOT NULL,
+          partner_cnpj_cpf TEXT NOT NULL,
+          net_total NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+          total_icms NUMERIC(15, 2) DEFAULT 0.00,
+          total_pis NUMERIC(15, 2) DEFAULT 0.00,
+          total_cofins NUMERIC(15, 2) DEFAULT 0.00,
+          total_ipi NUMERIC(15, 2) DEFAULT 0.00,
+          total_iss NUMERIC(15, 2) DEFAULT 0.00,
+          xml_content TEXT,
+          cancellation_reason TEXT,
+          authorized_at TIMESTAMPTZ,
+          canceled_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        -- 14. Compras & Suprimentos (PRD 08)
+        CREATE TABLE IF NOT EXISTS "${schemaName}".purchase_requisitions (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          number TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'PENDING',
+          requester_id TEXT NOT NULL,
+          requester_name TEXT NOT NULL,
+          justification TEXT NOT NULL,
+          items JSONB NOT NULL,
+          estimated_total NUMERIC(15, 2) DEFAULT 0.00,
+          approved_by TEXT,
+          approved_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS "${schemaName}".purchase_orders (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          number TEXT NOT NULL,
+          supplier_id UUID NOT NULL,
+          supplier_name TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'OPEN',
+          items JSONB NOT NULL,
+          total NUMERIC(15, 2) NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        -- 15. Contas Bancárias, Boletos, Pix & CNAB (PRD 09)
+        CREATE TABLE IF NOT EXISTS "${schemaName}".bank_accounts (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          bank_code TEXT NOT NULL,
+          bank_name TEXT NOT NULL,
+          agency TEXT NOT NULL,
+          account_number TEXT NOT NULL,
+          account_type TEXT NOT NULL DEFAULT 'CHECKING',
+          balance NUMERIC(15, 2) NOT NULL DEFAULT 0.00,
+          is_active BOOLEAN NOT NULL DEFAULT true,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS "${schemaName}".bank_slips (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          bank_account_id UUID NOT NULL REFERENCES "${schemaName}".bank_accounts(id),
+          our_number TEXT NOT NULL,
+          barcode TEXT NOT NULL,
+          digitable_line TEXT NOT NULL,
+          amount NUMERIC(15, 2) NOT NULL,
+          due_date TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'REGISTERED',
+          payer_name TEXT NOT NULL,
+          payer_document TEXT NOT NULL,
+          paid_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS "${schemaName}".pix_charges (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          txid TEXT NOT NULL UNIQUE,
+          amount NUMERIC(15, 2) NOT NULL,
+          pix_copia_e_cola TEXT NOT NULL,
+          qr_code_svg TEXT,
+          status TEXT NOT NULL DEFAULT 'ACTIVE',
+          debtor_name TEXT NOT NULL,
+          debtor_document TEXT NOT NULL,
+          paid_at TIMESTAMPTZ,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS "${schemaName}".cnab_files (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          type TEXT NOT NULL,
+          bank_code TEXT NOT NULL,
+          file_name TEXT NOT NULL,
+          sequential_number INT NOT NULL,
+          raw_content TEXT NOT NULL,
+          processed_records INT NOT NULL DEFAULT 0,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        -- 16. Contas a Receber Desacopladas (V2 - PRD PARTE 06)
         CREATE TABLE IF NOT EXISTS "${schemaName}".receivables_v2 (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           instance_id TEXT NOT NULL,
@@ -248,11 +659,11 @@ export class PostgresService {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
-        -- 9. Cobranças Efêmeras (Collections V2 - PRD PARTE 06)
+        -- 17. Cobranças Efêmeras (Collections V2 - PRD PARTE 06)
         CREATE TABLE IF NOT EXISTS "${schemaName}".collections_v2 (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           instance_id TEXT NOT NULL,
-          receivable_id UUID NOT NULL REFERENCES "${schemaName}".receivables_v2(id),
+          receivable_id UUID NOT NULL REFERENCES "${schemaName}".receivables_v2(id) ON DELETE CASCADE,
           method TEXT NOT NULL,
           provider TEXT NOT NULL,
           provider_transaction_id TEXT,
@@ -270,7 +681,7 @@ export class PostgresService {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
-        -- 10. Pagamentos e Baixas Financeiras (Payments V2 - PRD PARTE 06)
+        -- 18. Pagamentos e Baixas Financeiras (Payments V2 - PRD PARTE 06)
         CREATE TABLE IF NOT EXISTS "${schemaName}".payments_v2 (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           instance_id TEXT NOT NULL,
@@ -287,7 +698,7 @@ export class PostgresService {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
-        -- 11. Provedores de Pagamento Criptografados por Tenant (PRD PARTE 06)
+        -- 19. Provedores de Pagamento por Tenant (PRD PARTE 06)
         CREATE TABLE IF NOT EXISTS "${schemaName}".payment_providers_v2 (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           instance_id TEXT NOT NULL,
@@ -303,7 +714,7 @@ export class PostgresService {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
-        -- 12. Eventos de Webhook Idempotentes (PRD PARTE 06)
+        -- 20. Eventos de Webhook Idempotentes (PRD PARTE 06)
         CREATE TABLE IF NOT EXISTS "${schemaName}".webhook_events_v2 (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           instance_id TEXT NOT NULL,
@@ -317,7 +728,7 @@ export class PostgresService {
           error_message TEXT
         );
 
-        -- 13. Contas a Pagar (Obrigações Financeiras de Compras)
+        -- 21. Contas a Pagar (Obrigações Financeiras)
         CREATE TABLE IF NOT EXISTS "${schemaName}".accounts_payable (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
           code TEXT NOT NULL,
@@ -335,9 +746,20 @@ export class PostgresService {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+
+        -- Índices de Desempenho e Integridade do Tenant
+        CREATE INDEX IF NOT EXISTS "idx_${schemaName}_partners_doc" ON "${schemaName}".partners(document);
+        CREATE INDEX IF NOT EXISTS "idx_${schemaName}_products_code" ON "${schemaName}".products(code);
+        CREATE INDEX IF NOT EXISTS "idx_${schemaName}_quotes_num" ON "${schemaName}".quotes(number);
+        CREATE INDEX IF NOT EXISTS "idx_${schemaName}_sales_num" ON "${schemaName}".sales(number);
+        CREATE INDEX IF NOT EXISTS "idx_${schemaName}_billing_num" ON "${schemaName}".billing(number);
+        CREATE INDEX IF NOT EXISTS "idx_${schemaName}_receivables_status" ON "${schemaName}".receivables_v2(status);
+        CREATE INDEX IF NOT EXISTS "idx_${schemaName}_collections_rec" ON "${schemaName}".collections_v2(receivable_id);
+        CREATE INDEX IF NOT EXISTS "idx_${schemaName}_payments_rec" ON "${schemaName}".payments_v2(receivable_id);
+        CREATE INDEX IF NOT EXISTS "idx_${schemaName}_audit_ts" ON "${schemaName}".audit_logs(timestamp);
       `);
 
-      logger.info(`[PostgresService] Schema dedicado "${schemaName}" provisionado com sucesso.`);
+      logger.info(`[PostgresService] Schema dedicado "${schemaName}" provisionado com 21 tabelas e índices.`);
     } finally {
       client.release();
     }
@@ -393,7 +815,8 @@ export class PostgresService {
           role TEXT NOT NULL,
           permissions JSONB NOT NULL,
           is_active BOOLEAN NOT NULL DEFAULT true,
-          joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT uk_cp_user_company UNIQUE (user_id, company_id)
         );
 
         CREATE TABLE IF NOT EXISTS cp_company_modules (
@@ -401,7 +824,8 @@ export class PostgresService {
           company_id UUID NOT NULL REFERENCES cp_companies(id),
           module_code TEXT NOT NULL,
           is_enabled BOOLEAN NOT NULL DEFAULT false,
-          activated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          activated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          CONSTRAINT uk_cp_company_module UNIQUE (company_id, module_code)
         );
 
         CREATE TABLE IF NOT EXISTS cp_sessions (
@@ -442,6 +866,13 @@ export class PostgresService {
           mitigation_taken TEXT,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+
+        CREATE INDEX IF NOT EXISTS idx_cp_users_email ON cp_users(email);
+        CREATE INDEX IF NOT EXISTS idx_cp_companies_clean_cnpj ON cp_companies(clean_cnpj);
+        CREATE INDEX IF NOT EXISTS idx_cp_memberships_user ON cp_memberships(user_id);
+        CREATE INDEX IF NOT EXISTS idx_cp_memberships_company ON cp_memberships(company_id);
+        CREATE INDEX IF NOT EXISTS idx_cp_sessions_token ON cp_sessions(token_hash);
+        CREATE INDEX IF NOT EXISTS idx_cp_refresh_tokens_hash ON cp_refresh_tokens(token_hash);
       `);
 
       logger.info('[PostgresService] Tabelas globais do Control Plane inicializadas com sucesso.');

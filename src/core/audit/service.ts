@@ -5,6 +5,7 @@
 
 import crypto from 'crypto';
 import { dbEngine } from '../database/engine.js';
+import { RepositoryManager } from '../database/repositories/index.js';
 import { AuditLogEntry, SecurityEvent, SecurityEventType, SecurityEventSeverity } from '../../shared/types.js';
 import { logger } from '../logger/index.js';
 
@@ -61,6 +62,15 @@ export class AuditService {
     // Se houver schema de tenant associado, grava no schema operacional do tenant
     if (params.schemaNamespace) {
       dbEngine.appendTenantAuditLog(params.schemaNamespace, entry);
+      const cleanCnpj = params.schemaNamespace.replace('tenant_', '');
+      try {
+        const repo = RepositoryManager.getInstance().getRepositories();
+        repo.audit.recordTenantAudit(cleanCnpj, entry).catch((err) => {
+          logger.warn(`[AuditService] Aviso na persistência PostgreSQL de auditoria: ${err.message}`);
+        });
+      } catch {
+        // Fallback silencioso antes da inicialização do repositório
+      }
     }
 
     logger.info(`[AUDITORIA] ${entry.status} - ${entry.action} em ${entry.resource}`, {
@@ -93,6 +103,14 @@ export class AuditService {
     };
 
     dbEngine.appendSecurityEvent(event);
+    try {
+      const repo = RepositoryManager.getInstance().getRepositories();
+      repo.audit.recordSecurityEvent(event).catch((err) => {
+        logger.warn(`[AuditService] Aviso na persistência PostgreSQL de evento de segurança: ${err.message}`);
+      });
+    } catch {
+      // Fallback silencioso antes da inicialização do repositório
+    }
 
     logger.warn(`[SECURITY EVENT] [${event.severity}] ${event.type}: ${params.mitigationTaken}`, {
       type: event.type,

@@ -133,6 +133,8 @@ import { BoletoMath, PixEngine, CnabEngine, SUPPORTED_BANKS } from '../banking/b
 import { CollectionEngine } from '../collection/collectionEngine.js';
 import { PaymentProviderRegistry } from '../collection/paymentProviderRegistry.js';
 import { PostgresService } from './postgres.js';
+import { RepositoryManager } from './repositories/index.js';
+import { DatabaseSeeder } from './seed.js';
 
 export interface TenantStorage {
   settings: {
@@ -2663,9 +2665,25 @@ class DatabaseEngine {
         for (const company of this.companies.values()) {
           await PostgresService.provisionTenantSchema(company.cleanCnpj);
         }
+        await DatabaseSeeder.seed();
         logger.info('[DatabaseEngine] Conexão PostgreSQL ativa. Schemas isolados provisionados no banco de dados.');
       }
+
+      // Inicializa o RepositoryManager oficial
+      RepositoryManager.getInstance().initialize({
+        users: this.users,
+        companies: this.companies,
+        memberships: this.memberships,
+        sessions: this.sessions,
+        refreshTokens: this.refreshTokens,
+        securityEvents: this.securityEvents,
+        getTenantStorage: (cnpj) => this.getTenantStorage(cnpj),
+      });
     } catch (err: any) {
+      if (process.env.NODE_ENV === 'production') {
+        logger.error(`[DatabaseEngine] [FATAL] Falha de inicialização PostgreSQL em produção: ${err.message}`);
+        throw err;
+      }
       logger.warn(`[DatabaseEngine] Aviso na sincronização PostgreSQL: ${err.message}`);
     }
   }
@@ -3154,7 +3172,8 @@ class DatabaseEngine {
   }
 
   getTenantStorage(schemaNamespace: string): TenantStorage | undefined {
-    const storage = this.tenantSchemas.get(schemaNamespace);
+    const key = schemaNamespace.startsWith('tenant_') ? schemaNamespace : `tenant_${schemaNamespace}`;
+    const storage = this.tenantSchemas.get(key) || this.tenantSchemas.get(schemaNamespace);
     if (storage) {
       if (!storage.products) storage.products = [];
       if (!storage.quotes) storage.quotes = [];
@@ -3374,6 +3393,14 @@ class DatabaseEngine {
       updatedAt: new Date().toISOString(),
     };
     tenant.partners.unshift(newPartner);
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    try {
+      RepositoryManager.getInstance().getRepositories().partners.create(cleanCnpj, newPartner).catch((err) => {
+        logger.warn(`[DatabaseEngine] Aviso na persistência PostgreSQL de parceiro: ${err.message}`);
+      });
+    } catch {
+      // Ignora se repositório não inicializado
+    }
     return newPartner;
   }
 
@@ -3401,6 +3428,14 @@ class DatabaseEngine {
     };
 
     tenant.partners[index] = updated;
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    try {
+      RepositoryManager.getInstance().getRepositories().partners.update(cleanCnpj, partnerId, updates).catch((err) => {
+        logger.warn(`[DatabaseEngine] Aviso na atualização PostgreSQL de parceiro: ${err.message}`);
+      });
+    } catch {
+      // Ignora se repositório não inicializado
+    }
     return updated;
   }
 
@@ -3412,6 +3447,14 @@ class DatabaseEngine {
     if (index === -1) return false;
 
     tenant.partners.splice(index, 1);
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    try {
+      RepositoryManager.getInstance().getRepositories().partners.delete(cleanCnpj, partnerId).catch((err) => {
+        logger.warn(`[DatabaseEngine] Aviso na exclusão PostgreSQL de parceiro: ${err.message}`);
+      });
+    } catch {
+      // Ignora se repositório não inicializado
+    }
     return true;
   }
 
@@ -3589,6 +3632,14 @@ class DatabaseEngine {
       updatedAt: now,
     };
     storage.products.push(product);
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    try {
+      RepositoryManager.getInstance().getRepositories().products.create(cleanCnpj, product).catch((err) => {
+        logger.warn(`[DatabaseEngine] Aviso na persistência PostgreSQL de produto: ${err.message}`);
+      });
+    } catch {
+      // Ignora se repositório não inicializado
+    }
     return product;
   }
 
@@ -3610,6 +3661,14 @@ class DatabaseEngine {
       updatedAt: new Date().toISOString(),
     };
     storage.products[index] = updated;
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    try {
+      RepositoryManager.getInstance().getRepositories().products.update(cleanCnpj, id, updates).catch((err) => {
+        logger.warn(`[DatabaseEngine] Aviso na atualização PostgreSQL de produto: ${err.message}`);
+      });
+    } catch {
+      // Ignora se repositório não inicializado
+    }
     return updated;
   }
 
@@ -3728,6 +3787,14 @@ class DatabaseEngine {
     };
 
     storage.quotes.unshift(quote);
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    try {
+      RepositoryManager.getInstance().getRepositories().sales.createQuote(cleanCnpj, quote).catch((err) => {
+        logger.warn(`[DatabaseEngine] Aviso na persistência PostgreSQL de orçamento: ${err.message}`);
+      });
+    } catch {
+      // Ignora se repositório não inicializado
+    }
     return quote;
   }
 
@@ -3755,6 +3822,14 @@ class DatabaseEngine {
       updatedAt: new Date().toISOString(),
     };
     storage.quotes[index] = updated;
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    try {
+      RepositoryManager.getInstance().getRepositories().sales.updateQuote(cleanCnpj, id, updates).catch((err) => {
+        logger.warn(`[DatabaseEngine] Aviso na atualização PostgreSQL de orçamento: ${err.message}`);
+      });
+    } catch {
+      // Ignora se repositório não inicializado
+    }
     return updated;
   }
 
@@ -3862,6 +3937,21 @@ class DatabaseEngine {
     storage.sales.unshift(sale);
     quote.convertedSaleId = sale.id;
     quote.updatedAt = now;
+
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    try {
+      RepositoryManager.getInstance().getRepositories().sales.createSale(cleanCnpj, sale).catch((err) => {
+        logger.warn(`[DatabaseEngine] Aviso na persistência PostgreSQL de venda convertida: ${err.message}`);
+      });
+      RepositoryManager.getInstance().getRepositories().sales.updateQuote(cleanCnpj, quote.id, {
+        convertedSaleId: sale.id,
+        updatedAt: now,
+      }).catch((err) => {
+        logger.warn(`[DatabaseEngine] Aviso na atualização PostgreSQL de orçamento convertido: ${err.message}`);
+      });
+    } catch {
+      // Ignora se repositório não inicializado
+    }
 
     return { sale, alreadyConverted: false };
   }
@@ -3973,6 +4063,14 @@ class DatabaseEngine {
     };
 
     storage.sales.unshift(sale);
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    try {
+      RepositoryManager.getInstance().getRepositories().sales.createSale(cleanCnpj, sale).catch((err) => {
+        logger.warn(`[DatabaseEngine] Aviso na persistência PostgreSQL de venda: ${err.message}`);
+      });
+    } catch {
+      // Ignora se repositório não inicializado
+    }
     return sale;
   }
 
@@ -5296,6 +5394,14 @@ class DatabaseEngine {
     }
 
     storage.billingDocuments.unshift(doc);
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    try {
+      RepositoryManager.getInstance().getRepositories().billing.createBilling(cleanCnpj, doc).catch((err: any) => {
+        logger.warn(`[DatabaseEngine] Aviso na persistência PostgreSQL de faturamento: ${err.message}`);
+      });
+    } catch {
+      // Ignora se repositório não inicializado
+    }
 
     this.recordTenantAudit(
       schemaNamespace,
@@ -5845,6 +5951,14 @@ class DatabaseEngine {
     };
 
     storage.recurringBillings.unshift(recurring);
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    try {
+      RepositoryManager.getInstance().getRepositories().billing.createRecurring(cleanCnpj, recurring).catch((err) => {
+        logger.warn(`[DatabaseEngine] Aviso na persistência PostgreSQL de faturamento recorrente: ${err.message}`);
+      });
+    } catch {
+      // Ignora se repositório não inicializado
+    }
 
     this.recordTenantAudit(
       schemaNamespace,
@@ -9246,6 +9360,14 @@ class DatabaseEngine {
     });
 
     storage.auditLogs.unshift(result.audit);
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    try {
+      RepositoryManager.getInstance().getRepositories().receivables.createReceivable(cleanCnpj, result.receivable).catch((err: any) => {
+        logger.warn(`[DatabaseEngine] Aviso na persistência PostgreSQL de conta a receber: ${err.message}`);
+      });
+    } catch {
+      // Ignora se repositório não inicializado
+    }
     return result.receivable;
   }
 

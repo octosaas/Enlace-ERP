@@ -63,7 +63,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         headers,
       });
 
-      const data = (await res.json()) as ApiResponse<T>;
+      const contentType = res.headers.get('content-type') || '';
+      let data: ApiResponse<T>;
+      if (contentType.includes('application/json')) {
+        try {
+          data = (await res.json()) as ApiResponse<T>;
+        } catch {
+          throw new Error(`Falha ao decodificar resposta JSON do servidor (HTTP ${res.status}).`);
+        }
+      } else {
+        const text = await res.text();
+        throw new Error(
+          !res.ok
+            ? `Erro HTTP ${res.status} no endpoint ${path}: ${text.slice(0, 120)}`
+            : `Resposta inesperada do servidor (formato não-JSON) no endpoint ${path}`
+        );
+      }
+
       if (!res.ok) {
         throw new Error(data.error?.message || `HTTP ${res.status}`);
       }

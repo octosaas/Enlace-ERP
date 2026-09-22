@@ -152,7 +152,7 @@ export const ProcurementView: React.FC = () => {
         apiFetch<PurchaseQuotation[]>('/api/v1/purchases/quotations'),
         apiFetch<PurchaseOrder[]>('/api/v1/purchases/orders'),
         apiFetch<InboundInvoice[]>('/api/v1/purchases/inbound-invoices'),
-        apiFetch<BusinessPartner[]>('/api/v1/commercial/partners'),
+        apiFetch<BusinessPartner[]>('/api/v1/companies/active/partners'),
         apiFetch<Warehouse[]>('/api/v1/inventory/warehouses'),
         apiFetch<Product[]>('/api/v1/commercial/products'),
       ]);

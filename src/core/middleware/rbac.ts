@@ -6,6 +6,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { ForbiddenError } from '../errors/index.js';
 import { AuditService } from '../audit/service.js';
+import { ROLE_DEFAULT_PERMISSIONS } from '../../shared/permissions.js';
 
 export function requirePermission(permission: string) {
   return (req: Request, _res: Response, next: NextFunction) => {
@@ -15,7 +16,13 @@ export function requirePermission(permission: string) {
     }
 
     const { membership, activeCompany, user } = tenantCtx;
-    const hasPermission = membership.permissions.includes(permission);
+    // PRD 02 - Seção 21: OWNER possui autoridade máxima incondicional
+    // Suporte a permissões expressas na membership ou herdadas do perfil de papel padrão
+    const rolePermissions = ROLE_DEFAULT_PERMISSIONS[membership.role] || [];
+    const hasPermission =
+      membership.role === 'owner' ||
+      membership.permissions?.includes(permission) ||
+      rolePermissions.includes(permission);
 
     if (!hasPermission) {
       AuditService.record({

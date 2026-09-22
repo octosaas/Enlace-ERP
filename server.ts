@@ -1009,7 +1009,7 @@ app.post(
 
 // Listar parceiros de negócio no schema do tenant
 app.get(
-  ['/api/v1/companies/active/partners', '/api/v1/partners', '/api/v1/business-partners'],
+  ['/api/v1/companies/active/partners', '/api/v1/partners', '/api/v1/business-partners', '/api/v1/commercial/partners'],
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.CUSTOMERS_READ),
@@ -4302,7 +4302,7 @@ app.get(
 
 // 2. Listar Documentos de Faturamento com Filtros
 app.get(
-  '/api/v1/billing',
+  ['/api/v1/billing', '/api/v1/billing/documents'],
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.BILLING_VIEW),
@@ -6840,6 +6840,18 @@ app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
       code: 'INTERNAL_SERVER_ERROR',
       message: 'Ocorreu um erro interno de processamento.',
       requestId,
+    },
+  });
+});
+
+// Fallback para rotas /api/* não encontradas (garante retorno JSON e impede que caiam no fallback SPA do Vite)
+app.all('/api/*', (req: Request, res: Response) => {
+  res.status(404).json({
+    success: false,
+    error: {
+      code: 'ROUTE_NOT_FOUND',
+      message: `Rota da API não encontrada: ${req.method} ${req.originalUrl || req.url}`,
+      requestId: req.requestId || 'unknown',
     },
   });
 });
