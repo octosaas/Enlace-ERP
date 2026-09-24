@@ -84,8 +84,14 @@ class StructuredLogger {
     this.formatLog('warn', message, context);
   }
 
-  error(message: string, error?: Error, context?: LogContext) {
-    this.formatLog('error', message, context, error);
+  error(message: string, errorOrContext?: Error | LogContext, context?: LogContext) {
+    if (errorOrContext instanceof Error) {
+      this.formatLog('error', message, context, errorOrContext);
+    } else if (errorOrContext && typeof errorOrContext === 'object') {
+      this.formatLog('error', message, errorOrContext as LogContext, undefined);
+    } else {
+      this.formatLog('error', message, context, undefined);
+    }
   }
 
   debug(message: string, context?: LogContext) {

@@ -3,7 +3,7 @@
  * PRD 05 & PRD 09: Contas a Pagar, Contas Bancárias, Liquidação e Conciliação
  */
 
-import { AccountPayable, BankAccount } from '../../../shared/types.js';
+import { AccountPayable, BankAccount, BankSlip, PixCharge } from '../../../shared/types.js';
 import { PostgresService } from '../postgres.js';
 
 export interface IFinancialRepository {
@@ -22,6 +22,16 @@ export interface IFinancialRepository {
   findBankAccountById(cleanCnpj: string, id: string): Promise<BankAccount | undefined>;
   createBankAccount(cleanCnpj: string, account: BankAccount): Promise<BankAccount>;
   updateBankBalance(cleanCnpj: string, id: string, newBalance: number): Promise<BankAccount | undefined>;
+
+  listBankSlips(cleanCnpj: string): Promise<BankSlip[]>;
+  findBankSlipById(cleanCnpj: string, id: string): Promise<BankSlip | undefined>;
+  createBankSlip(cleanCnpj: string, slip: BankSlip): Promise<BankSlip>;
+  updateBankSlip(cleanCnpj: string, id: string, updates: Partial<BankSlip>): Promise<BankSlip | undefined>;
+
+  listPixCharges(cleanCnpj: string): Promise<PixCharge[]>;
+  findPixChargeByTxid(cleanCnpj: string, txid: string): Promise<PixCharge | undefined>;
+  createPixCharge(cleanCnpj: string, charge: PixCharge): Promise<PixCharge>;
+  updatePixCharge(cleanCnpj: string, txid: string, updates: Partial<PixCharge>): Promise<PixCharge | undefined>;
 }
 
 export class PostgresFinancialRepository implements IFinancialRepository {
@@ -274,12 +284,199 @@ export class PostgresFinancialRepository implements IFinancialRepository {
       updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : fallback?.updatedAt || new Date().toISOString(),
     };
   }
+
+  async listBankSlips(cleanCnpj: string): Promise<BankSlip[]> {
+    return PostgresService.withTenantClient(cleanCnpj, async (client, schemaName) => {
+      const res = await client.query(`SELECT * FROM "${schemaName}".bank_slips ORDER BY created_at DESC`);
+      return res.rows.map((r) => this.mapSlipRow(r));
+    });
+  }
+
+  async findBankSlipById(cleanCnpj: string, id: string): Promise<BankSlip | undefined> {
+    return PostgresService.withTenantClient(cleanCnpj, async (client, schemaName) => {
+      const res = await client.query(`SELECT * FROM "${schemaName}".bank_slips WHERE id = $1 LIMIT 1`, [id]);
+      if (res.rows.length === 0) return undefined;
+      return this.mapSlipRow(res.rows[0]);
+    });
+  }
+
+  async createBankSlip(cleanCnpj: string, slip: BankSlip): Promise<BankSlip> {
+    return PostgresService.withTenantClient(cleanCnpj, async (client, schemaName) => {
+      // Find a valid bank account id from schema if slip bank account is not uuid
+      let bankAccId = slip.bankCode;
+      const bankRes = await client.query(`SELECT id FROM "${schemaName}".bank_accounts LIMIT 1`);
+      if (bankRes.rows.length > 0) {
+        bankAccId = bankRes.rows[0].id;
+      }
+
+      const res = await client.query(
+        `INSERT INTO "${schemaName}".bank_slips (
+          id, bank_account_id, our_number, barcode, digitable_line, amount, due_date, status, payer_name, payer_document, created_at
+        ) VALUES (
+          COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW()
+        ) RETURNING *`,
+        [
+          slip.id && slip.id.includes('-') && slip.id.length >= 32 ? slip.id : null,
+          bankAccId,
+          slip.ourNumber,
+          slip.barcode,
+          slip.digitableLine,
+          slip.amount,
+          slip.dueDate,
+          slip.status || 'REGISTERED',
+          slip.payerName,
+          slip.payerDocument,
+        ]
+      );
+      return this.mapSlipRow(res.rows[0], slip);
+    });
+  }
+
+  async updateBankSlip(cleanCnpj: string, id: string, updates: Partial<BankSlip>): Promise<BankSlip | undefined> {
+    return PostgresService.withTenantClient(cleanCnpj, async (client, schemaName) => {
+      const fields: string[] = [];
+      const values: any[] = [];
+      let idx = 1;
+
+      if (updates.status !== undefined) {
+        fields.push(`status = $${idx++}`);
+        values.push(updates.status);
+      }
+      if (updates.paidAmount !== undefined || updates.paidDate !== undefined) {
+        fields.push(`paid_at = NOW()`);
+      }
+
+      if (fields.length === 0) return this.findBankSlipById(cleanCnpj, id);
+
+      values.push(id);
+      const res = await client.query(
+        `UPDATE "${schemaName}".bank_slips SET ${fields.join(', ')} WHERE id = $${idx} RETURNING *`,
+        values
+      );
+      if (res.rows.length === 0) return undefined;
+      return this.mapSlipRow(res.rows[0]);
+    });
+  }
+
+  async listPixCharges(cleanCnpj: string): Promise<PixCharge[]> {
+    return PostgresService.withTenantClient(cleanCnpj, async (client, schemaName) => {
+      const res = await client.query(`SELECT * FROM "${schemaName}".pix_charges ORDER BY created_at DESC`);
+      return res.rows.map((r) => this.mapPixRow(r));
+    });
+  }
+
+  async findPixChargeByTxid(cleanCnpj: string, txid: string): Promise<PixCharge | undefined> {
+    return PostgresService.withTenantClient(cleanCnpj, async (client, schemaName) => {
+      const res = await client.query(`SELECT * FROM "${schemaName}".pix_charges WHERE txid = $1 LIMIT 1`, [txid]);
+      if (res.rows.length === 0) return undefined;
+      return this.mapPixRow(res.rows[0]);
+    });
+  }
+
+  async createPixCharge(cleanCnpj: string, charge: PixCharge): Promise<PixCharge> {
+    return PostgresService.withTenantClient(cleanCnpj, async (client, schemaName) => {
+      const res = await client.query(
+        `INSERT INTO "${schemaName}".pix_charges (
+          id, txid, amount, pix_copia_e_cola, qr_code_svg, status, debtor_name, debtor_document, created_at
+        ) VALUES (
+          COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, NOW()
+        ) RETURNING *`,
+        [
+          charge.id && charge.id.includes('-') && charge.id.length >= 32 ? charge.id : null,
+          charge.txid,
+          charge.amount,
+          charge.emvPayload,
+          charge.qrCodeSvg || null,
+          charge.status || 'ACTIVE',
+          charge.customerName,
+          charge.customerDocument,
+        ]
+      );
+      return this.mapPixRow(res.rows[0], charge);
+    });
+  }
+
+  async updatePixCharge(cleanCnpj: string, txid: string, updates: Partial<PixCharge>): Promise<PixCharge | undefined> {
+    return PostgresService.withTenantClient(cleanCnpj, async (client, schemaName) => {
+      const fields: string[] = [];
+      const values: any[] = [];
+      let idx = 1;
+
+      if (updates.status !== undefined) {
+        fields.push(`status = $${idx++}`);
+        values.push(updates.status);
+      }
+      if (updates.paidAt !== undefined) {
+        fields.push(`paid_at = NOW()`);
+      }
+
+      if (fields.length === 0) return this.findPixChargeByTxid(cleanCnpj, txid);
+
+      values.push(txid);
+      const res = await client.query(
+        `UPDATE "${schemaName}".pix_charges SET ${fields.join(', ')} WHERE txid = $${idx} RETURNING *`,
+        values
+      );
+      if (res.rows.length === 0) return undefined;
+      return this.mapPixRow(res.rows[0]);
+    });
+  }
+
+  private mapSlipRow(row: any, fallback?: BankSlip): BankSlip {
+    return {
+      id: row.id,
+      ourNumber: row.our_number,
+      documentNumber: fallback?.documentNumber || `BOL-${row.our_number}`,
+      barcode: row.barcode,
+      digitableLine: row.digitable_line,
+      bankCode: fallback?.bankCode || '341',
+      bankName: fallback?.bankName || 'Banco Itaú',
+      agency: fallback?.agency || '0001',
+      account: fallback?.account || '00000',
+      wallet: fallback?.wallet || '109',
+      payerName: row.payer_name,
+      payerDocument: row.payer_document,
+      beneficiaryName: fallback?.beneficiaryName || 'Empresa',
+      beneficiaryDocument: fallback?.beneficiaryDocument || '',
+      issueDate: fallback?.issueDate || new Date().toISOString().split('T')[0],
+      dueDate: row.due_date,
+      amount: Number(row.amount),
+      finePercent: fallback?.finePercent || 2.0,
+      interestMonthlyPercent: fallback?.interestMonthlyPercent || 1.0,
+      status: row.status,
+      paidDate: row.paid_at ? new Date(row.paid_at).toISOString() : undefined,
+      createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+      updatedAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+    };
+  }
+
+  private mapPixRow(row: any, fallback?: PixCharge): PixCharge {
+    return {
+      id: row.id,
+      txid: row.txid,
+      customerName: row.debtor_name,
+      customerDocument: row.debtor_document,
+      description: fallback?.description || 'Cobrança Pix Dinâmico',
+      amount: Number(row.amount),
+      keyType: fallback?.keyType || 'CNPJ',
+      key: fallback?.key || '',
+      emvPayload: row.pix_copia_e_cola,
+      qrCodeSvg: row.qr_code_svg || '',
+      status: row.status,
+      expiresAt: fallback?.expiresAt || new Date(Date.now() + 86400000).toISOString(),
+      paidAt: row.paid_at ? new Date(row.paid_at).toISOString() : undefined,
+      createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+      updatedAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+    };
+  }
 }
 
 export class InMemoryFinancialRepository implements IFinancialRepository {
   constructor(
     private getPayables: (cleanCnpj: string) => AccountPayable[],
-    private getBankAccounts: (cleanCnpj: string) => BankAccount[]
+    private getBankAccounts: (cleanCnpj: string) => BankAccount[],
+    private getBankSlips?: (cleanCnpj: string) => BankSlip[],
+    private getPixCharges?: (cleanCnpj: string) => PixCharge[]
   ) {}
 
   async listPayables(cleanCnpj: string, filter?: { status?: string; supplierId?: string }): Promise<AccountPayable[]> {
@@ -345,5 +542,57 @@ export class InMemoryFinancialRepository implements IFinancialRepository {
     bank.currentBalance = newBalance;
     bank.updatedAt = new Date().toISOString();
     return bank;
+  }
+
+  async listBankSlips(cleanCnpj: string): Promise<BankSlip[]> {
+    if (!this.getBankSlips) return [];
+    return [...this.getBankSlips(cleanCnpj)];
+  }
+
+  async findBankSlipById(cleanCnpj: string, id: string): Promise<BankSlip | undefined> {
+    if (!this.getBankSlips) return undefined;
+    return this.getBankSlips(cleanCnpj).find((b) => b.id === id);
+  }
+
+  async createBankSlip(cleanCnpj: string, slip: BankSlip): Promise<BankSlip> {
+    if (this.getBankSlips) {
+      this.getBankSlips(cleanCnpj).unshift(slip);
+    }
+    return slip;
+  }
+
+  async updateBankSlip(cleanCnpj: string, id: string, updates: Partial<BankSlip>): Promise<BankSlip | undefined> {
+    if (!this.getBankSlips) return undefined;
+    const slips = this.getBankSlips(cleanCnpj);
+    const idx = slips.findIndex((s) => s.id === id);
+    if (idx === -1) return undefined;
+    slips[idx] = { ...slips[idx], ...updates, updatedAt: new Date().toISOString() };
+    return slips[idx];
+  }
+
+  async listPixCharges(cleanCnpj: string): Promise<PixCharge[]> {
+    if (!this.getPixCharges) return [];
+    return [...this.getPixCharges(cleanCnpj)];
+  }
+
+  async findPixChargeByTxid(cleanCnpj: string, txid: string): Promise<PixCharge | undefined> {
+    if (!this.getPixCharges) return undefined;
+    return this.getPixCharges(cleanCnpj).find((c) => c.txid === txid);
+  }
+
+  async createPixCharge(cleanCnpj: string, charge: PixCharge): Promise<PixCharge> {
+    if (this.getPixCharges) {
+      this.getPixCharges(cleanCnpj).unshift(charge);
+    }
+    return charge;
+  }
+
+  async updatePixCharge(cleanCnpj: string, txid: string, updates: Partial<PixCharge>): Promise<PixCharge | undefined> {
+    if (!this.getPixCharges) return undefined;
+    const charges = this.getPixCharges(cleanCnpj);
+    const idx = charges.findIndex((c) => c.txid === txid);
+    if (idx === -1) return undefined;
+    charges[idx] = { ...charges[idx], ...updates, updatedAt: new Date().toISOString() };
+    return charges[idx];
   }
 }

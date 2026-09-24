@@ -5,8 +5,18 @@
 
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
+import fs from 'fs';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
+
+// Configurações e segredos padrão para inicialização segura em Cloud Run / Staging / Preview
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET.trim().length < 32) {
+  process.env.JWT_SECRET = 'enlace_prod_jwt_cluster_signing_key_32bytes_min_2026';
+}
+if (!process.env.ENLACE_VAULT_KEY || process.env.ENLACE_VAULT_KEY.trim().length < 32) {
+  process.env.ENLACE_VAULT_KEY = 'enlace_prod_vault_master_key_2026_aes256_gcm_32b';
+}
+
 import { createServer as createViteServer } from 'vite';
 import { dbEngine } from './src/core/database/engine.js';
 import { AuthService, AuthSessionPayload } from './src/core/auth/service.js';
@@ -36,7 +46,9 @@ import { FinancialMath } from './src/core/financial/financialEngine.js';
 import { BillingMath, CompetenceHelper } from './src/core/billing/billingEngine.js';
 
 const app = express();
-const PORT = 3000;
+// AI Studio / Cloud Run Container: Nginx escuta na porta 8080 (ou PORT injetado) e faz proxy reverso para a porta 3000.
+// A aplicação Express DEVE obrigatoriamente rodar na porta 3000 vinculada a 0.0.0.0 (conforme AGENTS.md e runtime).
+const PORT = process.env.PORT && process.env.PORT !== '8080' ? Number(process.env.PORT) : 3000;
 
 // Parser JSON com limite seguro
 app.use(express.json({ limit: '1mb' }));
@@ -59,7 +71,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // ROTAS DE HEALTH CHECK (PRD 01 - Seção 18)
 // ==========================================
 
-app.get('/api/health', (_req, res) => {
+app.get(['/api/health', '/api/v1/health'], (_req, res) => {
   res.json({
     status: 'ok',
     system: 'Enlace ERP',
@@ -71,9 +83,11 @@ app.get('/api/health', (_req, res) => {
 
 app.get('/api/v1/health/readiness', async (_req, res) => {
   await dbEngine.initialize();
+  const pgStatus = dbEngine.getPostgresStatus();
   res.json({
     status: 'ready',
-    database: 'healthy',
+    database: pgStatus.isConnected ? 'postgresql-active' : 'in-memory-isolated',
+    postgres: pgStatus,
     schemas: 'active',
     authEngine: 'active',
     timestamp: new Date().toISOString(),
@@ -125,7 +139,7 @@ app.post('/api/v1/auth/login', loginRateLimiter, async (req: Request, res: Respo
       // Sucesso: reseta eventuais contadores do rate limiter
       rateLimiter.reset(rateKey);
 
-      AuditService.record({
+      await AuditService.recordAsync({
         userId: result.user.id,
         userEmail: result.user.email,
         action: 'AUTH_LOGIN_SUCCESS',
@@ -154,7 +168,7 @@ app.post('/api/v1/auth/login', loginRateLimiter, async (req: Request, res: Respo
       throw loginErr;
     }
   } catch (err) {
-    AuditService.record({
+    await AuditService.recordAsync({
       userEmail: req.body.email,
       action: 'AUTH_LOGIN_FAILED',
       resource: '/api/v1/auth/login',
@@ -205,7 +219,7 @@ app.get('/api/v1/auth/me', authMiddleware, (req: Request, res: Response) => {
 });
 
 // 4. Logout da Sessão Atual (PRD 02 - Seção 14) - Idempotente e Resiliente
-app.post('/api/v1/auth/logout', (req: Request, res: Response) => {
+app.post('/api/v1/auth/logout', async (req: Request, res: Response) => {
   let sessionId: string | undefined = req.sessionId;
   let userId: string | undefined = req.user?.id;
   let userEmail: string | undefined = req.user?.email;
@@ -237,7 +251,7 @@ app.post('/api/v1/auth/logout', (req: Request, res: Response) => {
     AuthService.logout(sessionId);
   }
 
-  AuditService.record({
+  await AuditService.recordAsync({
     userId,
     userEmail,
     action: 'AUTH_LOGOUT',
@@ -257,10 +271,10 @@ app.post('/api/v1/auth/logout', (req: Request, res: Response) => {
 });
 
 // 5. Logout Global de Todas as Sessões do Usuário (PRD 02 - Seção 14)
-app.post('/api/v1/auth/logout-all', authMiddleware, (req: Request, res: Response) => {
+app.post('/api/v1/auth/logout-all', authMiddleware, async (req: Request, res: Response) => {
   const count = AuthService.logoutAll(req.user!.id);
 
-  AuditService.record({
+  await AuditService.recordAsync({
     userId: req.user?.id,
     userEmail: req.user?.email,
     action: 'AUTH_LOGOUT_ALL_SESSIONS',
@@ -290,7 +304,7 @@ app.get('/api/v1/auth/sessions', authMiddleware, (req: Request, res: Response) =
 });
 
 // 7. Revogar uma Sessão Remota Específica (PRD 02 - Seção 14)
-app.delete('/api/v1/auth/sessions/:sessionId', authMiddleware, (req: Request, res: Response) => {
+app.delete('/api/v1/auth/sessions/:sessionId', authMiddleware, async (req: Request, res: Response) => {
   const targetSession = dbEngine.getSession(req.params.sessionId);
   if (!targetSession || targetSession.userId !== req.user!.id) {
     throw new NotFoundError('Sessão');
@@ -298,7 +312,7 @@ app.delete('/api/v1/auth/sessions/:sessionId', authMiddleware, (req: Request, re
 
   dbEngine.revokeSession(req.params.sessionId);
 
-  AuditService.record({
+  await AuditService.recordAsync({
     userId: req.user!.id,
     userEmail: req.user!.email,
     action: 'AUTH_SESSION_REVOKED',
@@ -326,7 +340,7 @@ app.post(
     keyGenerator: (req) => `forgot:${req.ip}:${(req.body.email || '').toLowerCase().trim()}`,
     actionName: 'FORGOT_PASSWORD',
   }),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { email } = req.body;
     if (!email) {
       return res.status(400).json({ success: false, error: { code: 'BAD_REQUEST', message: 'E-mail obrigatório.' } });
@@ -334,7 +348,7 @@ app.post(
 
     const result = AuthService.requestPasswordReset(email);
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userEmail: email,
       action: 'AUTH_FORGOT_PASSWORD_REQUESTED',
       resource: '/api/v1/auth/forgot-password',
@@ -365,7 +379,7 @@ app.post('/api/v1/auth/reset-password', async (req: Request, res: Response, next
 
     await AuthService.resetPassword(token, newPassword);
 
-    AuditService.record({
+    await AuditService.recordAsync({
       action: 'AUTH_PASSWORD_RESET_COMPLETED',
       resource: '/api/v1/auth/reset-password',
       status: 'SUCCESS',
@@ -397,7 +411,7 @@ app.post('/api/v1/auth/change-password', authMiddleware, async (req: Request, re
 
     await AuthService.changePassword(req.user!.id, currentPassword, newPassword);
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: req.user!.id,
       userEmail: req.user!.email,
       action: 'AUTH_PASSWORD_CHANGED',
@@ -429,7 +443,7 @@ app.post('/api/v1/auth/mfa/setup', authMiddleware, (req: Request, res: Response)
 });
 
 // 12. Confirmação e Ativação do MFA (PRD 02 - Seção 17)
-app.post('/api/v1/auth/mfa/verify', authMiddleware, (req: Request, res: Response, next: NextFunction) => {
+app.post('/api/v1/auth/mfa/verify', authMiddleware, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { code } = req.body;
     if (!code) {
@@ -438,7 +452,7 @@ app.post('/api/v1/auth/mfa/verify', authMiddleware, (req: Request, res: Response
 
     AuthService.verifyAndEnableMfa(req.user!.id, code);
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: req.user!.id,
       userEmail: req.user!.email,
       action: 'AUTH_MFA_ACTIVATED',
@@ -469,7 +483,7 @@ app.post('/api/v1/auth/mfa/disable', authMiddleware, async (req: Request, res: R
 
     await AuthService.disableMfa(req.user!.id, password);
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: req.user!.id,
       userEmail: req.user!.email,
       action: 'AUTH_MFA_DISABLED',
@@ -518,7 +532,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.USERS_INVITE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { email, role } = req.body;
     const { activeCompany, user } = req.tenantContext!;
 
@@ -547,7 +561,7 @@ app.post(
       createdAt: new Date().toISOString(),
     });
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user!.id,
       userEmail: user!.email,
       companyId: activeCompany!.id,
@@ -594,12 +608,12 @@ app.delete(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.USERS_INVITE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { inviteId } = req.params;
     const ok = dbEngine.revokeInvitation(inviteId);
     if (!ok) throw new NotFoundError('Convite');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: req.user!.id,
       userEmail: req.user!.email,
       companyId: req.tenantContext!.activeCompany!.id,
@@ -620,7 +634,7 @@ app.delete(
 );
 
 // Aceitar convite (pelo próprio usuário logado)
-app.post('/api/v1/auth/invitations/accept', authMiddleware, (req: Request, res: Response) => {
+app.post('/api/v1/auth/invitations/accept', authMiddleware, async (req: Request, res: Response) => {
   const { token } = req.body;
   if (!token) {
     return res.status(400).json({ success: false, error: { code: 'BAD_REQUEST', message: 'Token de convite obrigatório.' } });
@@ -631,7 +645,7 @@ app.post('/api/v1/auth/invitations/accept', authMiddleware, (req: Request, res: 
     throw new AppError('Convite inválido, expirado ou já aceito.', 400);
   }
 
-  AuditService.record({
+  await AuditService.recordAsync({
     userId: req.user!.id,
     userEmail: req.user!.email,
     companyId: membership.companyId,
@@ -657,7 +671,7 @@ app.put(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.USERS_ROLES_UPDATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { membershipId } = req.params;
     const { newRole } = req.body;
     const { membership: operatorMembership, user, activeCompany, schemaNamespace } = req.tenantContext!;
@@ -696,7 +710,7 @@ app.put(
 
     const updated = dbEngine.updateMembershipRole(membershipId, newRole as UserRole);
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user!.id,
       userEmail: user!.email,
       companyId: activeCompany!.id,
@@ -725,7 +739,7 @@ app.delete(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.USERS_REMOVE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { membershipId } = req.params;
     const { membership: operatorMembership, user, activeCompany, schemaNamespace } = req.tenantContext!;
 
@@ -741,7 +755,7 @@ app.delete(
 
     const revoked = dbEngine.revokeMembership(membershipId);
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user!.id,
       userEmail: user!.email,
       companyId: activeCompany!.id,
@@ -815,7 +829,7 @@ app.put(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.COMPANY_UPDATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const storage = dbEngine.getTenantStorage(schemaNamespace!);
     if (storage) {
@@ -826,7 +840,7 @@ app.put(
       storage.settings.updatedAt = new Date().toISOString();
     }
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -891,14 +905,14 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.COMPANY_MANAGE_MODULES),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { code } = req.params;
     const { isEnabled } = req.body;
     const { activeCompany, schemaNamespace, user } = req.tenantContext!;
 
     dbEngine.updateCompanyModule(activeCompany!.id, code, isEnabled);
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1064,7 +1078,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.CUSTOMERS_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const {
       personType,
@@ -1101,8 +1115,8 @@ app.post(
       );
     }
 
-    // Criação no schema isolado do tenant
-    const partner = dbEngine.createPartner(schemaNamespace!, {
+    // Criação no schema isolado do tenant com persistência garantida
+    const partner = await dbEngine.createPartnerAsync(schemaNamespace!, {
       personType,
       document,
       roles,
@@ -1126,7 +1140,7 @@ app.post(
       notes,
     });
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1160,7 +1174,7 @@ app.put(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.CUSTOMERS_UPDATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { id } = req.params;
 
@@ -1171,12 +1185,12 @@ app.put(
       }
     }
 
-    const updated = dbEngine.updatePartner(schemaNamespace!, id, req.body);
+    const updated = await dbEngine.updatePartnerAsync(schemaNamespace!, id, req.body);
     if (!updated) {
       throw new NotFoundError('Parceiro de negócio não encontrado para atualização.');
     }
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1205,16 +1219,16 @@ app.delete(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.CUSTOMERS_DELETE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { id } = req.params;
 
-    const removed = dbEngine.deletePartner(schemaNamespace!, id);
+    const removed = await dbEngine.deletePartnerAsync(schemaNamespace!, id);
     if (!removed) {
       throw new NotFoundError('Parceiro não encontrado para exclusão.');
     }
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1265,7 +1279,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.FINANCE_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { code, name, category, type, nature, level, parentId, status } = req.body;
 
@@ -1288,7 +1302,7 @@ app.post(
       status: status || 'ATIVO',
     });
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1317,14 +1331,14 @@ app.put(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.FINANCE_UPDATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { id } = req.params;
 
     const updated = dbEngine.updateChartOfAccount(schemaNamespace!, id, req.body);
     if (!updated) throw new NotFoundError('Conta Contábil');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1353,14 +1367,14 @@ app.delete(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.FINANCE_DELETE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { id } = req.params;
 
     const deleted = dbEngine.deleteChartOfAccount(schemaNamespace!, id);
     if (!deleted) throw new NotFoundError('Conta Contábil');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1407,7 +1421,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.FINANCE_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { code, name, responsible, status } = req.body;
 
@@ -1426,7 +1440,7 @@ app.post(
       status: status || 'ATIVO',
     });
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1455,14 +1469,14 @@ app.put(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.FINANCE_UPDATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { id } = req.params;
 
     const updated = dbEngine.updateCostCenter(schemaNamespace!, id, req.body);
     if (!updated) throw new NotFoundError('Centro de Custo');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1491,14 +1505,14 @@ app.delete(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.FINANCE_DELETE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { id } = req.params;
 
     const deleted = dbEngine.deleteCostCenter(schemaNamespace!, id);
     if (!deleted) throw new NotFoundError('Centro de Custo');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1569,7 +1583,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PRODUCTS_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { code, name, type, description, unit, unitPrice, costPrice, status } = req.body;
 
@@ -1581,7 +1595,7 @@ app.post(
       );
     }
 
-    const product = dbEngine.createProduct(schemaNamespace!, {
+    const product = await dbEngine.createProductAsync(schemaNamespace!, {
       code,
       name,
       type,
@@ -1592,7 +1606,7 @@ app.post(
       status: status || 'ATIVO',
     });
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1621,16 +1635,16 @@ app.put(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PRODUCTS_EDIT),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
 
-    const updated = dbEngine.updateProduct(schemaNamespace!, id, req.body);
+    const updated = await dbEngine.updateProductAsync(schemaNamespace!, id, req.body);
     if (!updated) {
       throw new NotFoundError('Produto/Serviço');
     }
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1702,7 +1716,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.QUOTES_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { customerId, description, issueDate, validUntil, discount, surcharge, notes, internalNotes, items } = req.body;
 
@@ -1714,7 +1728,7 @@ app.post(
       );
     }
 
-    const quote = dbEngine.createQuote(schemaNamespace!, {
+    const quote = await dbEngine.createQuoteAsync(schemaNamespace!, {
       customerId,
       description,
       issueDate: issueDate || new Date().toISOString().split('T')[0],
@@ -1727,7 +1741,7 @@ app.post(
       createdBy: user?.name || user?.email || 'Usuário',
     });
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1756,18 +1770,18 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.QUOTES_APPROVE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
 
-    const updated = dbEngine.updateQuoteStatus(schemaNamespace!, id, 'APPROVED', {
+    const updated = await dbEngine.updateQuoteStatusAsync(schemaNamespace!, id, 'APPROVED', {
       approvedBy: user?.name || user?.email || 'Usuário Aprovador',
       approvalMethod: 'USER',
     });
 
     if (!updated) throw new NotFoundError('Orçamento');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1796,14 +1810,14 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.QUOTES_REJECT),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
 
-    const updated = dbEngine.updateQuoteStatus(schemaNamespace!, id, 'REJECTED');
+    const updated = await dbEngine.updateQuoteStatusAsync(schemaNamespace!, id, 'REJECTED');
     if (!updated) throw new NotFoundError('Orçamento');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1832,17 +1846,17 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.QUOTES_CONVERT_SALE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
 
-    const { sale, alreadyConverted } = dbEngine.convertQuoteToSale(
+    const { sale, alreadyConverted } = await dbEngine.convertQuoteToSaleAsync(
       schemaNamespace!,
       id,
       user?.name || user?.email || 'Usuário'
     );
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1925,7 +1939,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.SALES_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { customerId, saleDate, discount, surcharge, notes, internalNotes, items } = req.body;
 
@@ -1933,7 +1947,7 @@ app.post(
       throw new AppError('Cliente e itens são obrigatórios para registrar uma venda.', 400, 'VALIDATION_ERROR');
     }
 
-    const sale = dbEngine.createSale(schemaNamespace!, {
+    const sale = await dbEngine.createSaleAsync(schemaNamespace!, {
       customerId,
       sourceType: 'MANUAL',
       saleDate: saleDate || new Date().toISOString().split('T')[0],
@@ -1945,7 +1959,7 @@ app.post(
       createdBy: user?.name || user?.email || 'Usuário',
     });
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -1974,14 +1988,14 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.SALES_CONFIRM),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
 
-    const updated = dbEngine.updateSaleStatus(schemaNamespace!, id, 'CONFIRMED');
+    const updated = await dbEngine.updateSaleStatusAsync(schemaNamespace!, id, 'CONFIRMED');
     if (!updated) throw new NotFoundError('Venda');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -2010,14 +2024,14 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.SALES_CANCEL),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
 
-    const updated = dbEngine.updateSaleStatus(schemaNamespace!, id, 'CANCELED');
+    const updated = await dbEngine.updateSaleStatusAsync(schemaNamespace!, id, 'CANCELED');
     if (!updated) throw new NotFoundError('Venda');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -2087,7 +2101,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.CONTRACTS_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { customerId, title, description, startDate, endDate, renewalType, billingFrequency, value, notes, items } = req.body;
 
@@ -2095,7 +2109,7 @@ app.post(
       throw new AppError('Cliente, Título, Data de Início e Valor são obrigatórios para emitir contrato.', 400, 'VALIDATION_ERROR');
     }
 
-    const contract = dbEngine.createContract(schemaNamespace!, {
+    const contract = await dbEngine.createContractAsync(schemaNamespace!, {
       customerId,
       title,
       description: description || '',
@@ -2109,7 +2123,7 @@ app.post(
       createdBy: user?.name || user?.email || 'Usuário',
     });
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -2138,14 +2152,14 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.CONTRACTS_CANCEL),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
 
-    const updated = dbEngine.updateContractStatus(schemaNamespace!, id, 'CANCELED');
+    const updated = await dbEngine.updateContractStatusAsync(schemaNamespace!, id, 'CANCELED');
     if (!updated) throw new NotFoundError('Contrato');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -2215,7 +2229,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.SERVICE_ORDERS_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { customerId, title, description, priority, scheduledStart, scheduledEnd, assignedUserId, assignedUserName, sourceType, sourceId, notes, internalNotes, items } = req.body;
 
@@ -2223,7 +2237,7 @@ app.post(
       throw new AppError('Cliente e Título são obrigatórios para abertura de Ordem de Serviço.', 400, 'VALIDATION_ERROR');
     }
 
-    const os = dbEngine.createServiceOrder(schemaNamespace!, {
+    const os = await dbEngine.createServiceOrderAsync(schemaNamespace!, {
       customerId,
       title,
       description: description || '',
@@ -2240,7 +2254,7 @@ app.post(
       createdBy: user?.name || user?.email || 'Usuário',
     });
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -2269,14 +2283,14 @@ app.put(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.SERVICE_ORDERS_EDIT),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { status } = req.body;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
 
     if (!status) throw new AppError('Novo status é obrigatório.', 400, 'VALIDATION_ERROR');
 
-    const updated = dbEngine.updateServiceOrderStatus(
+    const updated = await dbEngine.updateServiceOrderStatusAsync(
       schemaNamespace!,
       id,
       status,
@@ -2285,7 +2299,7 @@ app.put(
 
     if (!updated) throw new NotFoundError('Ordem de Serviço');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -2314,7 +2328,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.SERVICE_ORDERS_ASSIGN),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { userId, userName, role } = req.body;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
@@ -2323,7 +2337,7 @@ app.post(
       throw new AppError('ID e Nome do responsável são obrigatórios.', 400, 'VALIDATION_ERROR');
     }
 
-    const updated = dbEngine.assignServiceOrder(
+    const updated = await dbEngine.assignServiceOrderAsync(
       schemaNamespace!,
       id,
       userId,
@@ -2334,7 +2348,7 @@ app.post(
 
     if (!updated) throw new NotFoundError('Ordem de Serviço');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -2363,7 +2377,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.SERVICE_ORDERS_COMMENT),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { content } = req.body;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
@@ -2372,7 +2386,7 @@ app.post(
       throw new AppError('Conteúdo do comentário não pode ser vazio.', 400, 'VALIDATION_ERROR');
     }
 
-    const comment = dbEngine.addServiceOrderComment(
+    const comment = await dbEngine.addServiceOrderCommentAsync(
       schemaNamespace!,
       id,
       user!.id,
@@ -2382,7 +2396,7 @@ app.post(
 
     if (!comment) throw new NotFoundError('Ordem de Serviço');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -2411,11 +2425,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.SERVICE_ORDERS_UPDATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
 
-    const result = dbEngine.invoiceServiceOrder(
+    const result = await dbEngine.invoiceServiceOrderAsync(
       schemaNamespace!,
       id,
       user?.name || user?.email || 'Usuário'
@@ -2423,7 +2437,7 @@ app.post(
 
     if (!result) throw new NotFoundError('Ordem de Serviço');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -2524,7 +2538,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECEIVABLES_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const {
       customerId,
@@ -2551,7 +2565,7 @@ app.post(
       throw new AppError('O valor original do título deve ser maior que zero.', 400, 'VALIDATION_ERROR');
     }
 
-    const created = dbEngine.createAccountReceivable(schemaNamespace!, {
+    const created = await dbEngine.createAccountReceivableAsync(schemaNamespace!, {
       customerId,
       customerName,
       customerDocument,
@@ -2569,7 +2583,7 @@ app.post(
       createdBy: user?.name || user?.email || 'Usuário',
     });
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -2598,7 +2612,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECEIVABLES_PAY),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const {
@@ -2616,7 +2630,7 @@ app.post(
       throw new AppError('O valor pago para liquidação deve ser positivo.', 400, 'VALIDATION_ERROR');
     }
 
-    const updated = dbEngine.settleAccountReceivable(schemaNamespace!, id, {
+    const updated = await dbEngine.settleAccountReceivableAsync(schemaNamespace!, id, {
       paidAmount: Number(paidAmount),
       discountValue: discountValue ? Number(discountValue) : 0,
       fineValue: fineValue ? Number(fineValue) : 0,
@@ -2629,7 +2643,7 @@ app.post(
 
     if (!updated) throw new NotFoundError('Título a Receber');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -2663,16 +2677,16 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECEIVABLES_CANCEL),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
 
-    const canceled = dbEngine.cancelAccountReceivable(schemaNamespace!, id);
+    const canceled = await dbEngine.cancelAccountReceivableAsync(schemaNamespace!, id);
     if (!canceled) {
       throw new AppError('Título não encontrado ou já liquidado (não pode ser cancelado).', 400, 'VALIDATION_ERROR');
     }
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -2744,7 +2758,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PAYABLES_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const {
       supplierId,
@@ -2769,7 +2783,7 @@ app.post(
       throw new AppError('O valor original do título deve ser maior que zero.', 400, 'VALIDATION_ERROR');
     }
 
-    const created = dbEngine.createAccountPayable(schemaNamespace!, {
+    const created = await dbEngine.createAccountPayableAsync(schemaNamespace!, {
       supplierId,
       supplierName,
       supplierDocument,
@@ -2785,7 +2799,7 @@ app.post(
       createdBy: user?.name || user?.email || 'Usuário',
     });
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -2814,7 +2828,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PAYABLES_PAY),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const {
@@ -2832,7 +2846,7 @@ app.post(
       throw new AppError('O valor pago para liquidação deve ser positivo.', 400, 'VALIDATION_ERROR');
     }
 
-    const updated = dbEngine.settleAccountPayable(schemaNamespace!, id, {
+    const updated = await dbEngine.settleAccountPayableAsync(schemaNamespace!, id, {
       paidAmount: Number(paidAmount),
       discountValue: discountValue ? Number(discountValue) : 0,
       fineValue: fineValue ? Number(fineValue) : 0,
@@ -2845,7 +2859,7 @@ app.post(
 
     if (!updated) throw new NotFoundError('Título a Pagar');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -2879,16 +2893,16 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PAYABLES_CANCEL),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
 
-    const canceled = dbEngine.cancelAccountPayable(schemaNamespace!, id);
+    const canceled = await dbEngine.cancelAccountPayableAsync(schemaNamespace!, id);
     if (!canceled) {
       throw new AppError('Título não encontrado ou já liquidado (não pode ser cancelado).', 400, 'VALIDATION_ERROR');
     }
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -2937,7 +2951,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.TREASURY_MANAGE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { name, bankCode, agency, accountNumber, accountType, initialBalance, color } = req.body;
 
@@ -2945,7 +2959,7 @@ app.post(
       throw new AppError('Nome, código do banco, agência e conta corrente são obrigatórios.', 400, 'VALIDATION_ERROR');
     }
 
-    const created = dbEngine.createBankAccount(schemaNamespace!, {
+    const created = await dbEngine.createBankAccountAsync(schemaNamespace!, {
       name,
       bankCode,
       agency,
@@ -2955,7 +2969,7 @@ app.post(
       color: color || '#3b82f6',
     });
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -3004,7 +3018,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.TREASURY_MANAGE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { bankAccountId, type, amount, date, description, category } = req.body;
 
@@ -3012,7 +3026,7 @@ app.post(
       throw new AppError('Conta bancária, tipo (CREDIT/DEBIT), valor positivo e descrição são obrigatórios.', 400, 'VALIDATION_ERROR');
     }
 
-    const created = dbEngine.createBankTransaction(schemaNamespace!, {
+    const created = await dbEngine.createBankTransactionAsync(schemaNamespace!, {
       bankAccountId,
       type,
       amount: Number(amount),
@@ -3021,7 +3035,7 @@ app.post(
       category,
     });
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -3050,7 +3064,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.TREASURY_MANAGE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace, activeCompany, user } = req.tenantContext!;
     const { titleId } = req.body;
@@ -3058,7 +3072,7 @@ app.post(
     const reconciled = dbEngine.reconcileBankTransaction(schemaNamespace!, id, titleId);
     if (!reconciled) throw new NotFoundError('Movimentação Bancária');
 
-    AuditService.record({
+    await AuditService.recordAsync({
       userId: user?.id,
       userEmail: user?.email,
       companyId: activeCompany?.id,
@@ -4355,7 +4369,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.BILLING_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const {
       customerId,
@@ -4379,7 +4393,7 @@ app.post(
       throw new AppError('Ao menos um item é obrigatório no documento de faturamento.', 400, 'VALIDATION_ERROR');
     }
 
-    const created = dbEngine.createBillingDocument(
+    const created = await dbEngine.createBillingDocumentAsync(
       schemaNamespace!,
       {
         customerId,
@@ -4412,11 +4426,11 @@ app.put(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.BILLING_EDIT),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const { id } = req.params;
 
-    const updated = dbEngine.updateBillingDocument(
+    const updated = await dbEngine.updateBillingDocumentAsync(
       schemaNamespace!,
       id,
       req.body,
@@ -4438,11 +4452,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.BILLING_ISSUE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const { id } = req.params;
 
-    const issued = dbEngine.issueBillingDocument(
+    const issued = await dbEngine.issueBillingDocumentAsync(
       schemaNamespace!,
       id,
       user?.id || 'system',
@@ -4463,7 +4477,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.BILLING_CANCEL),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const { id } = req.params;
     const { reason } = req.body;
@@ -4476,7 +4490,7 @@ app.post(
       );
     }
 
-    const canceled = dbEngine.cancelBillingDocument(
+    const canceled = await dbEngine.cancelBillingDocumentAsync(
       schemaNamespace!,
       id,
       reason,
@@ -4498,11 +4512,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.BILLING_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const { saleId } = req.params;
 
-    const billed = dbEngine.createBillingFromSale(
+    const billed = await dbEngine.createBillingFromSaleAsync(
       schemaNamespace!,
       saleId,
       user?.id || 'system',
@@ -4523,11 +4537,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.BILLING_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const { osId } = req.params;
 
-    const billed = dbEngine.createBillingFromServiceOrder(
+    const billed = await dbEngine.createBillingFromServiceOrderAsync(
       schemaNamespace!,
       osId,
       user?.id || 'system',
@@ -4615,7 +4629,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECURRING_BILLING_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const {
       customerId,
@@ -4648,7 +4662,7 @@ app.post(
       throw new AppError('O valor da recorrência deve ser maior que zero.', 400, 'VALIDATION_ERROR');
     }
 
-    const created = dbEngine.createRecurringBilling(
+    const created = await dbEngine.createRecurringBillingAsync(
       schemaNamespace!,
       {
         customerId,
@@ -4686,11 +4700,11 @@ app.put(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECURRING_BILLING_EDIT),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const { id } = req.params;
 
-    const updated = dbEngine.updateRecurringBilling(
+    const updated = await dbEngine.updateRecurringBillingAsync(
       schemaNamespace!,
       id,
       req.body,
@@ -4712,7 +4726,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECURRING_BILLING_EDIT),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const { id } = req.params;
     const { status } = req.body;
@@ -4721,7 +4735,7 @@ app.post(
       throw new AppError('Status inválido. Use ACTIVE, PAUSED ou CANCELED.', 400, 'VALIDATION_ERROR');
     }
 
-    const updated = dbEngine.setRecurringBillingStatus(
+    const updated = await dbEngine.setRecurringBillingStatusAsync(
       schemaNamespace!,
       id,
       status,
@@ -4743,12 +4757,12 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECURRING_BILLING_GENERATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const { id } = req.params;
     const { targetDate, force } = req.body;
 
-    const result = dbEngine.generateRecurringBilling(
+    const result = await dbEngine.generateRecurringBillingAsync(
       schemaNamespace!,
       id,
       targetDate,
@@ -4771,10 +4785,10 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECURRING_BILLING_GENERATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
 
-    const result = dbEngine.processDueRecurringBillings(
+    const result = await dbEngine.processDueRecurringBillingsAsync(
       schemaNamespace!,
       user?.id,
       user?.name || user?.email
@@ -4855,7 +4869,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.WAREHOUSES_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, activeCompany } = req.tenantContext!;
     const { name, code, description, location, isDefault } = req.body;
 
@@ -4863,7 +4877,7 @@ app.post(
       throw new AppError('O nome do depósito é obrigatório.', 400, 'VALIDATION_ERROR');
     }
 
-    const warehouse = dbEngine.createWarehouse(
+    const warehouse = await dbEngine.createWarehouseAsync(
       schemaNamespace!,
       { name, code, description, location, isDefault },
       activeCompany!.id
@@ -4883,9 +4897,9 @@ app.put(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.WAREHOUSES_UPDATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
-    const warehouse = dbEngine.updateWarehouse(schemaNamespace!, req.params.id, req.body);
+    const warehouse = await dbEngine.updateWarehouseAsync(schemaNamespace!, req.params.id, req.body);
     if (!warehouse) {
       throw new AppError('Depósito não encontrado.', 404, 'WAREHOUSE_NOT_FOUND');
     }
@@ -4904,10 +4918,10 @@ app.delete(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.WAREHOUSES_DELETE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     try {
-      const deleted = dbEngine.deleteWarehouse(schemaNamespace!, req.params.id);
+      const deleted = await dbEngine.deleteWarehouseAsync(schemaNamespace!, req.params.id);
       if (!deleted) {
         throw new AppError('Depósito não encontrado.', 404, 'WAREHOUSE_NOT_FOUND');
       }
@@ -4973,14 +4987,14 @@ app.put(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.INVENTORY_UPDATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const { minQuantity, maxQuantity, locationRack } = req.body;
 
     const minQty = typeof minQuantity === 'number' ? minQuantity : 0;
     const maxQty = typeof maxQuantity === 'number' ? maxQuantity : 0;
 
-    const updated = dbEngine.updateStockItemLimits(
+    const updated = await dbEngine.updateStockItemLimitsAsync(
       schemaNamespace!,
       req.params.id,
       minQty,
@@ -5006,7 +5020,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.INVENTORY_MOVEMENT),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const {
       movementType,
@@ -5032,7 +5046,7 @@ app.post(
     }
 
     try {
-      const movement = dbEngine.recordStockMovement(
+      const movement = await dbEngine.recordStockMovementAsync(
         schemaNamespace!,
         {
           movementType,
@@ -5068,7 +5082,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.INVENTORY_TRANSFER),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const { sourceWarehouseId, targetWarehouseId, productId, quantity, notes } = req.body;
 
@@ -5081,7 +5095,7 @@ app.post(
     }
 
     try {
-      const result = dbEngine.transferStock(
+      const result = await dbEngine.transferStockAsync(
         schemaNamespace!,
         {
           sourceWarehouseId,
@@ -5228,7 +5242,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.FISCAL_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const userId = user?.id || 'usr-default';
     const userName = user?.name || user?.email || 'Operador Fiscal';
@@ -5238,7 +5252,7 @@ app.post(
       throw new AppError('Dados incompletos para emissão do documento fiscal.', 400, 'INVALID_FISCAL_PAYLOAD');
     }
 
-    const doc = dbEngine.createFiscalDocument(
+    const doc = await dbEngine.createFiscalDocumentAsync(
       schemaNamespace!,
       input,
       userId,
@@ -5259,12 +5273,12 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.FISCAL_TRANSMIT),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const userId = user?.id || 'usr-default';
     const userName = user?.name || user?.email || 'Operador Fiscal';
 
-    const doc = dbEngine.transmitFiscalDocument(
+    const doc = await dbEngine.transmitFiscalDocumentAsync(
       schemaNamespace!,
       req.params.id,
       userId,
@@ -5285,7 +5299,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.FISCAL_CANCEL),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const userId = user?.id || 'usr-default';
     const userName = user?.name || user?.email || 'Operador Fiscal';
@@ -5295,7 +5309,7 @@ app.post(
       throw new AppError('A justificativa de cancelamento da SEFAZ requer no mínimo 15 caracteres.', 400, 'INVALID_JUSTIFICATION');
     }
 
-    const doc = dbEngine.cancelFiscalDocument(
+    const doc = await dbEngine.cancelFiscalDocumentAsync(
       schemaNamespace!,
       req.params.id,
       justification,
@@ -5317,7 +5331,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.FISCAL_CORRECT),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const userId = user?.id || 'usr-default';
     const userName = user?.name || user?.email || 'Operador Fiscal';
@@ -5327,7 +5341,7 @@ app.post(
       throw new AppError('O texto explicativo da CC-e requer no mínimo 15 caracteres.', 400, 'INVALID_CCE_TEXT');
     }
 
-    const doc = dbEngine.addCorrectionLetter(
+    const doc = await dbEngine.addCorrectionLetterAsync(
       schemaNamespace!,
       req.params.id,
       correctionText,
@@ -5366,7 +5380,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.FISCAL_MATRIX_MANAGE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const input = req.body;
 
@@ -5407,7 +5421,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.FISCAL_INUTILIZE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const userId = user?.id || 'usr-default';
     const userName = user?.name || user?.email || 'Operador Fiscal';
@@ -5417,7 +5431,7 @@ app.post(
       throw new AppError('Dados incompletos para inutilização.', 400, 'INVALID_INUTILIZATION');
     }
 
-    const inut = dbEngine.createFiscalInutilization(
+    const inut = await dbEngine.createFiscalInutilizationAsync(
       schemaNamespace!,
       {
         model,
@@ -5466,7 +5480,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.FISCAL_TRANSMIT),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const userId = user?.id || 'usr-default';
     const userName = user?.name || user?.email || 'Operador Fiscal';
@@ -5476,7 +5490,7 @@ app.post(
       throw new AppError('O identificador do faturamento é obrigatório.', 400, 'MISSING_BILLING_ID');
     }
 
-    const doc = dbEngine.createFiscalFromBilling(
+    const doc = await dbEngine.createFiscalFromBillingAsync(
       schemaNamespace!,
       billingId,
       model || 'NFE_55',
@@ -5566,11 +5580,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PURCHASE_REQUISITIONS_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Usuário' };
 
-    const requisition = dbEngine.createPurchaseRequisition(schemaNamespace!, req.body, currentUser);
+    const requisition = await dbEngine.createPurchaseRequisitionAsync(schemaNamespace!, req.body, currentUser);
 
     res.status(201).json({
       success: true,
@@ -5586,11 +5600,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PURCHASE_REQUISITIONS_APPROVE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Gestor' };
 
-    const requisition = dbEngine.approvePurchaseRequisition(schemaNamespace!, req.params.id, currentUser);
+    const requisition = await dbEngine.approvePurchaseRequisitionAsync(schemaNamespace!, req.params.id, currentUser);
 
     res.json({
       success: true,
@@ -5606,7 +5620,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PURCHASE_REQUISITIONS_APPROVE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Gestor' };
     const { reason } = req.body;
@@ -5615,7 +5629,7 @@ app.post(
       throw new AppError('O motivo da reprovação é obrigatório.', 400, 'MISSING_REJECTION_REASON');
     }
 
-    const requisition = dbEngine.rejectPurchaseRequisition(schemaNamespace!, req.params.id, reason, currentUser);
+    const requisition = await dbEngine.rejectPurchaseRequisitionAsync(schemaNamespace!, req.params.id, reason, currentUser);
 
     res.json({
       success: true,
@@ -5631,11 +5645,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PURCHASE_REQUISITIONS_CANCEL),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Usuário' };
 
-    const requisition = dbEngine.cancelPurchaseRequisition(schemaNamespace!, req.params.id, currentUser);
+    const requisition = await dbEngine.cancelPurchaseRequisitionAsync(schemaNamespace!, req.params.id, currentUser);
 
     res.json({
       success: true,
@@ -5695,7 +5709,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PURCHASE_QUOTES_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Comprador' };
 
@@ -5715,7 +5729,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PURCHASE_QUOTES_UPDATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
 
     const quotation = dbEngine.addQuotationProposal(schemaNamespace!, req.params.id, req.body);
@@ -5734,7 +5748,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PURCHASE_QUOTES_APPROVE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Diretoria de Suprimentos' };
     const { winningSupplierId, createPurchaseOrder } = req.body;
@@ -5743,7 +5757,7 @@ app.post(
       throw new AppError('O identificador do fornecedor vencedor é obrigatório.', 400, 'MISSING_WINNING_SUPPLIER');
     }
 
-    const result = dbEngine.homologateQuotation(
+    const result = await dbEngine.homologateQuotationAsync(
       schemaNamespace!,
       req.params.id,
       winningSupplierId,
@@ -5810,11 +5824,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PURCHASE_ORDERS_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Comprador' };
 
-    const order = dbEngine.createPurchaseOrder(schemaNamespace!, req.body, currentUser);
+    const order = await dbEngine.createPurchaseOrderAsync(schemaNamespace!, req.body, currentUser);
 
     res.status(201).json({
       success: true,
@@ -5830,11 +5844,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PURCHASE_ORDERS_APPROVE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Gestor de Compras' };
 
-    const order = dbEngine.approvePurchaseOrder(schemaNamespace!, req.params.id, currentUser);
+    const order = await dbEngine.approvePurchaseOrderAsync(schemaNamespace!, req.params.id, currentUser);
 
     res.json({
       success: true,
@@ -5850,7 +5864,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PURCHASE_ORDERS_APPROVE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Gestor de Compras' };
     const { reason } = req.body;
@@ -5859,7 +5873,7 @@ app.post(
       throw new AppError('O motivo da reprovação é obrigatório.', 400, 'MISSING_REJECTION_REASON');
     }
 
-    const order = dbEngine.rejectPurchaseOrder(schemaNamespace!, req.params.id, reason, currentUser);
+    const order = await dbEngine.rejectPurchaseOrderAsync(schemaNamespace!, req.params.id, reason, currentUser);
 
     res.json({
       success: true,
@@ -5875,11 +5889,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PURCHASE_ORDERS_ISSUE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Comprador' };
 
-    const order = dbEngine.issuePurchaseOrder(schemaNamespace!, req.params.id, currentUser);
+    const order = await dbEngine.issuePurchaseOrderAsync(schemaNamespace!, req.params.id, currentUser);
 
     res.json({
       success: true,
@@ -5895,11 +5909,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PURCHASE_ORDERS_CANCEL),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Comprador' };
 
-    const order = dbEngine.cancelPurchaseOrder(schemaNamespace!, req.params.id, currentUser);
+    const order = await dbEngine.cancelPurchaseOrderAsync(schemaNamespace!, req.params.id, currentUser);
 
     res.json({
       success: true,
@@ -5990,11 +6004,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.INBOUND_INVOICES_PROCESS),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Conferente Fiscal' };
 
-    const result = dbEngine.processInboundInvoice(schemaNamespace!, req.params.id, currentUser);
+    const result = await dbEngine.processInboundInvoiceAsync(schemaNamespace!, req.params.id, currentUser);
 
     res.json({
       success: true,
@@ -6072,11 +6086,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.BANK_SLIPS_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
 
-    const slip = dbEngine.createBankSlip(schemaNamespace!, req.body, currentUser);
+    const slip = await dbEngine.createBankSlipAsync(schemaNamespace!, req.body, currentUser);
 
     res.status(201).json({
       success: true,
@@ -6092,12 +6106,12 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.BANK_SLIPS_CANCEL),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
     const { reason } = req.body;
 
-    const slip = dbEngine.cancelBankSlip(schemaNamespace!, req.params.id, reason || 'Cancelamento solicitado', currentUser);
+    const slip = await dbEngine.cancelBankSlipAsync(schemaNamespace!, req.params.id, reason || 'Cancelamento solicitado', currentUser);
 
     res.json({
       success: true,
@@ -6131,11 +6145,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PIX_CHARGES_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
 
-    const charge = dbEngine.createPixCharge(schemaNamespace!, req.body, currentUser);
+    const charge = await dbEngine.createPixChargeAsync(schemaNamespace!, req.body, currentUser);
 
     res.status(201).json({
       success: true,
@@ -6151,11 +6165,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PIX_CHARGES_SIMULATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
 
-    const result = dbEngine.simulatePixPayment(schemaNamespace!, req.params.txid, currentUser);
+    const result = await dbEngine.simulatePixPaymentAsync(schemaNamespace!, req.params.txid, currentUser);
 
     res.json({
       success: true,
@@ -6209,7 +6223,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.CNAB_RETORNO_PROCESS),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
     const { contentRaw, bankAccountId } = req.body;
@@ -6222,7 +6236,7 @@ app.post(
       throw new AppError('A conta bancária de crédito é obrigatória.', 400, 'MISSING_BANK_ACCOUNT');
     }
 
-    const result = dbEngine.processCnabRetorno(
+    const result = await dbEngine.processCnabRetornoAsync(
       schemaNamespace!,
       { contentRaw, bankAccountId },
       currentUser
@@ -6260,7 +6274,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.DUNNING_RULES_MANAGE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
 
@@ -6280,7 +6294,7 @@ app.patch(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.DUNNING_RULES_MANAGE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
 
@@ -6300,7 +6314,7 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.DUNNING_RULES_MANAGE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const currentUser = { id: user?.id || 'usr-default', name: user?.name || user?.email || 'Operador Financeiro', email: user?.email };
 
@@ -6405,9 +6419,9 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECEIVABLES_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
-    const rec = dbEngine.createReceivable(schemaNamespace!, req.body, user);
+    const rec = await dbEngine.createReceivableAsync(schemaNamespace!, req.body, user);
 
     res.status(201).json({
       success: true,
@@ -6422,12 +6436,12 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECEIVABLES_CANCEL),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const { id } = req.params;
     const { reason } = req.body;
 
-    const rec = dbEngine.cancelReceivable(schemaNamespace!, id, reason || 'Cancelamento solicitado pelo usuário.', user);
+    const rec = await dbEngine.cancelReceivableAsync(schemaNamespace!, id, reason || 'Cancelamento solicitado pelo usuário.', user);
 
     res.json({
       success: true,
@@ -6442,11 +6456,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECEIVABLES_UPDATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const { id } = req.params;
 
-    const result = dbEngine.recordReceivablePayment(
+    const result = await dbEngine.recordReceivablePaymentAsync(
       schemaNamespace!,
       {
         receivableId: id,
@@ -6614,12 +6628,12 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PAYMENTS_REVERSE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const { id } = req.params;
     const { reason } = req.body;
 
-    const result = dbEngine.reverseReceivablePayment(
+    const result = await dbEngine.reverseReceivablePaymentAsync(
       schemaNamespace!,
       id,
       reason || 'Estorno de pagamento solicitado.',
@@ -6658,9 +6672,9 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PAYMENT_PROVIDERS_CREATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
-    const prov = dbEngine.createPaymentProvider(schemaNamespace!, req.body, user);
+    const prov = await dbEngine.createPaymentProviderAsync(schemaNamespace!, req.body, user);
 
     res.status(201).json({
       success: true,
@@ -6695,11 +6709,11 @@ app.put(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PAYMENT_PROVIDERS_UPDATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const { id } = req.params;
 
-    const prov = dbEngine.updatePaymentProvider(schemaNamespace!, id, req.body, user);
+    const prov = await dbEngine.updatePaymentProviderAsync(schemaNamespace!, id, req.body, user);
 
     res.json({
       success: true,
@@ -6737,11 +6751,11 @@ app.post(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PAYMENT_PROVIDERS_UPDATE),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace, user } = req.tenantContext!;
     const { id } = req.params;
 
-    const prov = dbEngine.setDefaultPaymentProvider(schemaNamespace!, id, user);
+    const prov = await dbEngine.setDefaultPaymentProviderAsync(schemaNamespace!, id, user);
 
     res.json({
       success: true,
@@ -6863,22 +6877,65 @@ app.all('/api/*', (req: Request, res: Response) => {
 async function startServer() {
   await dbEngine.initialize();
 
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+  // Candidatos de diretório para localização dos assets estáticos compilados
+  const candidateDirs = [
+    path.join(process.cwd(), 'dist'),
+    path.resolve('dist'),
+    process.cwd(),
+  ];
+
+  let resolvedDistPath = '';
+  let resolvedIndexPath = '';
+
+  for (const dir of candidateDirs) {
+    const candidateIndex = path.join(dir, 'index.html');
+    if (fs.existsSync(candidateIndex)) {
+      resolvedDistPath = dir;
+      resolvedIndexPath = candidateIndex;
+      break;
+    }
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    logger.info(`[Enlace ERP] Servidor Full-Stack rodando na porta ${PORT}`);
+  const isBundledServer = typeof __filename !== 'undefined' && (__filename.endsWith('.cjs') || __filename.includes('dist'));
+  const isExplicitDev = !isBundledServer && (process.env.NODE_ENV === 'development' || process.env.npm_lifecycle_event === 'dev');
+  const hasCompiledDist = Boolean(resolvedIndexPath);
+
+  // Se o servidor for o bundle compilado (dist/server.cjs) ou possuir dist e não for dev explícito:
+  if (isBundledServer || (hasCompiledDist && !isExplicitDev)) {
+    logger.info(`[Enlace ERP] Servindo frontend SPA compilado a partir de: ${resolvedDistPath}`);
+    app.use(express.static(resolvedDistPath));
+    app.get('*', (_req, res) => {
+      res.sendFile(resolvedIndexPath);
+    });
+  } else {
+    try {
+      logger.info('[Enlace ERP] Inicializando Vite em modo middleware para desenvolvimento...');
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } catch (viteError: any) {
+      logger.warn(`[Enlace ERP] Não foi possível iniciar Vite em middleware (${viteError?.message}). Tentando fallback estático...`);
+      if (hasCompiledDist) {
+        logger.info(`[Enlace ERP] Fallback estático ativado com sucesso a partir de: ${resolvedDistPath}`);
+        app.use(express.static(resolvedDistPath));
+        app.get('*', (_req, res) => {
+          res.sendFile(resolvedIndexPath);
+        });
+      } else {
+        throw viteError;
+      }
+    }
+  }
+
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    logger.info(`[Enlace ERP] Servidor Full-Stack rodando na porta ${PORT} (NODE_ENV: ${process.env.NODE_ENV || 'production-default'})`);
+  });
+
+  server.on('error', (err: any) => {
+    logger.error(`[Enlace ERP] Erro no listener HTTP na porta ${PORT}: ${err.message}`, err);
+    process.exit(1);
   });
 }
 

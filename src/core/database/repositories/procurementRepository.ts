@@ -238,10 +238,14 @@ export class PostgresProcurementRepository implements IProcurementRepository {
       taxesTotal: Number(row.taxes || 0),
       grandTotal: Number(row.total),
       paymentTerm: fallback?.paymentTerm || '30 dias',
-      paymentMethod: fallback?.paymentMethod || 'BANK_SLIP',
+      paymentMethod: fallback?.paymentMethod || 'BOLETO',
       deliveryAddress: typeof fallback?.deliveryAddress === 'string' ? fallback.deliveryAddress : 'Endereço Principal',
       warehouseId: fallback?.warehouseId || 'wh-default',
       warehouseName: fallback?.warehouseName || 'Almoxarifado Central',
+      createdById: fallback?.createdById || 'user-default',
+      createdByName: fallback?.createdByName || 'Operador Compras',
+      createdAt: row.created_at ? new Date(row.created_at).toISOString() : fallback?.createdAt || new Date().toISOString(),
+      updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : fallback?.updatedAt || new Date().toISOString(),
     };
   }
 }

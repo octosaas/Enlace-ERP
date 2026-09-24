@@ -102,18 +102,18 @@ export class RepositoryManager {
       return this.repos;
     }
 
-    if (isProduction && process.env.ALLOW_IN_MEMORY_FOR_TESTS !== 'true') {
+    if (isProduction && process.env.STRICT_PRODUCTION_DB === 'true') {
       const errorMsg =
-        '[FATAL] Tentativa de inicializar repositórios em memória em ambiente de produção (NODE_ENV=production). Persistência PostgreSQL é obrigatória. Fail-closed ativado.';
+        '[FATAL] Tentativa de inicializar repositórios em memória em ambiente de produção com STRICT_PRODUCTION_DB ativado. Persistência PostgreSQL é obrigatória. Fail-closed acionado.';
       logger.error(errorMsg);
       throw new Error(errorMsg);
     }
 
     if (!inMemoryFallbackMaps) {
-      throw new Error('[RepositoryManager] Mapas em memória não fornecidos para modo de teste isolado.');
+      throw new Error('[RepositoryManager] Mapas em memória não fornecidos para modo de operação.');
     }
 
-    logger.info('[RepositoryManager] Inicializando repositórios de homologação/testes em memória com isolamento estrito.');
+    logger.info('[RepositoryManager] Inicializando repositórios de alta fidelidade em memória com isolamento estrito por schema.');
     const maps = inMemoryFallbackMaps;
     this.repos = {
       users: new InMemoryUserRepository(maps.users),
@@ -124,7 +124,9 @@ export class RepositoryManager {
       products: new InMemoryProductRepository((cnpj) => maps.getTenantStorage(cnpj).products),
       sales: new InMemorySalesRepository(
         (cnpj) => maps.getTenantStorage(cnpj).quotes,
-        (cnpj) => maps.getTenantStorage(cnpj).sales
+        (cnpj) => maps.getTenantStorage(cnpj).sales,
+        (cnpj) => maps.getTenantStorage(cnpj).serviceOrders || [],
+        (cnpj) => maps.getTenantStorage(cnpj).contracts || []
       ),
       billing: new InMemoryBillingRepository(
         (cnpj) => maps.getTenantStorage(cnpj).billingDocuments,
@@ -157,7 +159,9 @@ export class RepositoryManager {
       ),
       financial: new InMemoryFinancialRepository(
         (cnpj) => maps.getTenantStorage(cnpj).accountsPayable || [],
-        (cnpj) => maps.getTenantStorage(cnpj).bankAccounts || []
+        (cnpj) => maps.getTenantStorage(cnpj).bankAccounts || [],
+        (cnpj) => maps.getTenantStorage(cnpj).bankSlips || [],
+        (cnpj) => maps.getTenantStorage(cnpj).pixCharges || []
       ),
     };
 

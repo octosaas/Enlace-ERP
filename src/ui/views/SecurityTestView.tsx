@@ -132,7 +132,7 @@ export const SecurityTestView: React.FC = () => {
           <div className="space-y-1">
             <div className="flex items-center gap-2">
               <span className="rounded bg-emerald-950 border border-emerald-800 px-2 py-0.5 text-xs font-semibold text-emerald-400">
-                PRD 01 A 05 • SUÍTE DE {tests.length || 40} TESTES
+                PRD 01 A 09 • SUÍTE DE {tests.length || 35} TESTES
               </span>
               <span className="text-xs text-slate-400">Auditoria & Testes de Isolamento Multi-Tenant</span>
             </div>
@@ -157,7 +157,7 @@ export const SecurityTestView: React.FC = () => {
             ) : (
               <>
                 <Play className="h-4 w-4" />
-                Executar Todos os {tests.length || 28} Testes
+                Executar Todos os {tests.length || 35} Testes
               </>
             )}
           </button>

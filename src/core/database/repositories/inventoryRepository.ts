@@ -11,6 +11,8 @@ export interface IInventoryRepository {
   listWarehouses(cleanCnpj: string): Promise<Warehouse[]>;
   findWarehouseById(cleanCnpj: string, id: string): Promise<Warehouse | undefined>;
   createWarehouse(cleanCnpj: string, warehouse: Warehouse): Promise<Warehouse>;
+  updateWarehouse(cleanCnpj: string, id: string, data: Partial<Warehouse>): Promise<Warehouse | undefined>;
+  deleteWarehouse(cleanCnpj: string, id: string): Promise<boolean>;
 
   listStockItems(cleanCnpj: string, warehouseId?: string): Promise<StockItem[]>;
   findStockItem(cleanCnpj: string, warehouseId: string, productId: string): Promise<StockItem | undefined>;
@@ -57,6 +59,48 @@ export class PostgresInventoryRepository implements IInventoryRepository {
         ]
       );
       return this.mapWarehouseRow(res.rows[0], w);
+    });
+  }
+
+  async updateWarehouse(cleanCnpj: string, id: string, data: Partial<Warehouse>): Promise<Warehouse | undefined> {
+    return PostgresService.withTenantClient(cleanCnpj, async (client, schemaName) => {
+      const updates: string[] = [];
+      const values: any[] = [id];
+      let idx = 2;
+
+      if (data.name !== undefined) {
+        updates.push(`name = $${idx++}`);
+        values.push(data.name);
+      }
+      if (data.code !== undefined) {
+        updates.push(`code = $${idx++}`);
+        values.push(data.code);
+      }
+      if (data.isDefault !== undefined) {
+        updates.push(`is_default = $${idx++}`);
+        values.push(data.isDefault);
+      }
+      if (data.isActive !== undefined) {
+        updates.push(`is_active = $${idx++}`);
+        values.push(data.isActive);
+      }
+
+      if (updates.length === 0) {
+        return this.findWarehouseById(cleanCnpj, id);
+      }
+
+      updates.push(`updated_at = NOW()`);
+      const query = `UPDATE "${schemaName}".warehouses SET ${updates.join(', ')} WHERE id = $1 RETURNING *`;
+      const res = await client.query(query, values);
+      if (res.rows.length === 0) return undefined;
+      return this.mapWarehouseRow(res.rows[0]);
+    });
+  }
+
+  async deleteWarehouse(cleanCnpj: string, id: string): Promise<boolean> {
+    return PostgresService.withTenantClient(cleanCnpj, async (client, schemaName) => {
+      const res = await client.query(`DELETE FROM "${schemaName}".warehouses WHERE id = $1`, [id]);
+      return (res.rowCount ?? 0) > 0;
     });
   }
 
@@ -298,6 +342,22 @@ export class InMemoryInventoryRepository implements IInventoryRepository {
   async createWarehouse(cleanCnpj: string, warehouse: Warehouse): Promise<Warehouse> {
     this.getWarehouses(cleanCnpj).unshift(warehouse);
     return warehouse;
+  }
+
+  async updateWarehouse(cleanCnpj: string, id: string, data: Partial<Warehouse>): Promise<Warehouse | undefined> {
+    const list = this.getWarehouses(cleanCnpj);
+    const item = list.find((w) => w.id === id);
+    if (!item) return undefined;
+    Object.assign(item, data);
+    return item;
+  }
+
+  async deleteWarehouse(cleanCnpj: string, id: string): Promise<boolean> {
+    const list = this.getWarehouses(cleanCnpj);
+    const idx = list.findIndex((w) => w.id === id);
+    if (idx === -1) return false;
+    list.splice(idx, 1);
+    return true;
   }
 
   async listStockItems(cleanCnpj: string, warehouseId?: string): Promise<StockItem[]> {

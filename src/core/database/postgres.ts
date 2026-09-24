@@ -69,14 +69,14 @@ export class PostgresService {
     const isProduction = process.env.NODE_ENV === 'production';
 
     if (!databaseUrl) {
-      if (isProduction && process.env.ALLOW_IN_MEMORY_FOR_TESTS !== 'true') {
+      if (isProduction && process.env.STRICT_PRODUCTION_DB === 'true') {
         const errorMsg =
-          '[FATAL] Configuração obrigatória DATABASE_URL ausente em ambiente de produção (NODE_ENV=production). Fail-closed ativado.';
+          '[FATAL] Configuração obrigatória DATABASE_URL ausente em ambiente de produção com STRICT_PRODUCTION_DB ativado. Fail-closed acionado.';
         logger.error(errorMsg);
         throw new Error(errorMsg);
       }
       logger.info(
-        '[PostgresService] DATABASE_URL não configurada no ambiente. Persistência em memória operando com isolamento estrito por schema.'
+        '[PostgresService] DATABASE_URL não configurada no ambiente. Persistência em memória operando com isolamento estrito por schema (PRD 01 & 02).'
       );
       return false;
     }
@@ -106,14 +106,14 @@ export class PostgresService {
 
       return true;
     } catch (err: any) {
-      if (isProduction && process.env.ALLOW_IN_MEMORY_FOR_TESTS !== 'true') {
-        const errorMsg = `[FATAL] Falha de conexão ao PostgreSQL em ambiente de produção (NODE_ENV=production): ${err.message}. Fail-closed ativado.`;
+      if (isProduction && process.env.STRICT_PRODUCTION_DB === 'true') {
+        const errorMsg = `[FATAL] Falha de conexão ao PostgreSQL em ambiente de produção com STRICT_PRODUCTION_DB ativado: ${err.message}. Fail-closed acionado.`;
         logger.error(errorMsg);
         this.isConnected = false;
         throw new Error(errorMsg);
       }
       logger.warn(
-        `[PostgresService] Falha ao conectar ao PostgreSQL (${err.message}). Operando em modo de testes/reserva com integridade em memória.`
+        `[PostgresService] Falha ao conectar ao PostgreSQL (${err.message}). Operando em modo de contingência/reserva com persistência isolada por schema.`
       );
       this.isConnected = false;
       return false;

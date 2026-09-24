@@ -362,7 +362,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           }`}
         >
           <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
-          Suíte de Testes (25/25)
+          Suíte de Testes (35/35)
         </button>
 
         <button

@@ -5,6 +5,7 @@
 
 import crypto from 'crypto';
 import { dbEngine } from '../database/engine.js';
+import { PostgresService } from '../database/postgres.js';
 import { RepositoryManager } from '../database/repositories/index.js';
 import { AuditLogEntry, SecurityEvent, SecurityEventType, SecurityEventSeverity } from '../../shared/types.js';
 import { logger } from '../logger/index.js';
@@ -66,10 +67,13 @@ export class AuditService {
       try {
         const repo = RepositoryManager.getInstance().getRepositories();
         repo.audit.recordTenantAudit(cleanCnpj, entry).catch((err) => {
-          logger.warn(`[AuditService] Aviso na persistência PostgreSQL de auditoria: ${err.message}`);
+          logger.error(`[AuditService] Falha na persistência PostgreSQL de auditoria do tenant: ${err.message}`, {
+            cleanCnpj,
+            entryId: entry.id,
+          });
         });
       } catch {
-        // Fallback silencioso antes da inicialização do repositório
+        // Fallback para modo isolado sem repositórios ativos
       }
     }
 
@@ -82,6 +86,19 @@ export class AuditService {
       requestId: entry.requestId,
     });
 
+    return entry;
+  }
+
+  /**
+   * Persiste entrada de auditoria com confirmação assíncrona no PostgreSQL
+   */
+  static async recordAsync(params: RecordAuditParams): Promise<AuditLogEntry> {
+    const entry = this.record(params);
+    if (params.schemaNamespace && PostgresService.isDbConnected()) {
+      const cleanCnpj = params.schemaNamespace.replace('tenant_', '');
+      const repo = RepositoryManager.getInstance().getRepositories();
+      await repo.audit.recordTenantAudit(cleanCnpj, entry);
+    }
     return entry;
   }
 
@@ -106,10 +123,13 @@ export class AuditService {
     try {
       const repo = RepositoryManager.getInstance().getRepositories();
       repo.audit.recordSecurityEvent(event).catch((err) => {
-        logger.warn(`[AuditService] Aviso na persistência PostgreSQL de evento de segurança: ${err.message}`);
+        logger.error(`[AuditService] Falha na persistência PostgreSQL de evento de segurança: ${err.message}`, {
+          eventId: event.id,
+          type: event.type,
+        });
       });
     } catch {
-      // Fallback silencioso antes da inicialização do repositório
+      // Fallback para modo isolado sem repositórios ativos
     }
 
     logger.warn(`[SECURITY EVENT] [${event.severity}] ${event.type}: ${params.mitigationTaken}`, {
