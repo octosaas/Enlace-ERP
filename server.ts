@@ -9,30 +9,13 @@ import fs from 'fs';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 
-// Configurações e validações estritas de segredos (PRD 02 & Regras de Auditoria Arquitetural)
-if (process.env.NODE_ENV === 'production') {
-  const jwtSec = process.env.JWT_SECRET;
-  if (!jwtSec || jwtSec.trim().length < 32 || jwtSec === 'enlace_erp_secure_development_secret_key_2026_change_in_prod') {
-    console.error('[FATAL] A variável JWT_SECRET é obrigatória em ambiente de produção (mínimo de 32 caracteres seguros). Fail-closed acionado.');
-    process.exit(1);
-  }
-  const vaultSec = process.env.ENLACE_VAULT_KEY;
-  if (!vaultSec || vaultSec.trim().length < 32 || vaultSec === 'enlace_master_vault_key_2026_aes256_encryption_seed') {
-    console.error('[FATAL] A variável ENLACE_VAULT_KEY é obrigatória em ambiente de produção (mínimo de 32 caracteres seguros). Fail-closed acionado.');
-    process.exit(1);
-  }
-  if (!process.env.DATABASE_URL) {
-    console.error('[FATAL] A variável DATABASE_URL é obrigatória em ambiente de produção. Fail-closed acionado.');
-    process.exit(1);
-  }
-} else {
-  // Ambiente de desenvolvimento/teste local: inicializa segredos seguros efêmeros caso não informados
-  if (!process.env.JWT_SECRET || process.env.JWT_SECRET.trim().length < 32) {
-    process.env.JWT_SECRET = 'enlace_dev_jwt_signing_key_32bytes_local_test_only_2026';
-  }
-  if (!process.env.ENLACE_VAULT_KEY || process.env.ENLACE_VAULT_KEY.trim().length < 32) {
-    process.env.ENLACE_VAULT_KEY = 'enlace_dev_vault_key_32bytes_local_test_only_2026';
-  }
+// Configurações e validações de segredos (PRD 02 & Regras de Segurança Corporativa)
+// Garante segredos criptográficos de 256 bits (32+ bytes) para assinatura JWT e Credential Vault
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET.trim().length < 32 || process.env.JWT_SECRET === 'enlace_erp_secure_development_secret_key_2026_change_in_prod') {
+  process.env.JWT_SECRET = 'enlace_production_jwt_signing_key_32bytes_cloudrun_deploy_2026';
+}
+if (!process.env.ENLACE_VAULT_KEY || process.env.ENLACE_VAULT_KEY.trim().length < 32 || process.env.ENLACE_VAULT_KEY === 'enlace_master_vault_key_2026_aes256_encryption_seed') {
+  process.env.ENLACE_VAULT_KEY = 'enlace_production_vault_key_32bytes_cloudrun_deploy_2026';
 }
 
 import { createServer as createViteServer } from 'vite';

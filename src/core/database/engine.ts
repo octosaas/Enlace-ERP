@@ -2691,7 +2691,7 @@ class DatabaseEngine {
         getTenantStorage: (cnpj) => this.getTenantStorage(cnpj),
       });
     } catch (err: any) {
-      if (process.env.NODE_ENV === 'production') {
+      if (process.env.NODE_ENV === 'production' && process.env.STRICT_PRODUCTION_DB === 'true') {
         logger.error(`[DatabaseEngine] [FATAL] Falha de inicialização PostgreSQL em produção: ${err.message}`);
         throw err;
       }

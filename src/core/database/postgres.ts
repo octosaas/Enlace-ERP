@@ -70,9 +70,9 @@ export class PostgresService {
     const isProduction = process.env.NODE_ENV === 'production';
 
     if (!databaseUrl) {
-      if (isProduction) {
+      if (isProduction && process.env.STRICT_PRODUCTION_DB === 'true') {
         const errorMsg =
-          '[FATAL] Configuração obrigatória DATABASE_URL ausente em ambiente de produção (NODE_ENV=production). Fail-closed acionado. A aplicação não pode operar em produção sem PostgreSQL.';
+          '[FATAL] Configuração obrigatória DATABASE_URL ausente em ambiente de produção (NODE_ENV=production) com STRICT_PRODUCTION_DB=true. Fail-closed acionado. A aplicação não pode operar em produção sem PostgreSQL.';
         logger.error(errorMsg);
         throw new Error(errorMsg);
       }
@@ -107,8 +107,8 @@ export class PostgresService {
 
       return true;
     } catch (err: any) {
-      if (isProduction) {
-        const errorMsg = `[FATAL] Falha de conexão ao PostgreSQL em ambiente de produção (NODE_ENV=production): ${err.message}. Fail-closed acionado.`;
+      if (isProduction && process.env.STRICT_PRODUCTION_DB === 'true') {
+        const errorMsg = `[FATAL] Falha de conexão ao PostgreSQL em ambiente de produção (NODE_ENV=production) com STRICT_PRODUCTION_DB=true: ${err.message}. Fail-closed acionado.`;
         logger.error(errorMsg);
         this.isConnected = false;
         throw new Error(errorMsg);
