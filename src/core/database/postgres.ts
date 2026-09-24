@@ -8,6 +8,7 @@ import pg from 'pg';
 import { drizzle, NodePgDatabase } from 'drizzle-orm/node-postgres';
 import * as schema from './schema.js';
 import { logger } from '../logger/index.js';
+import { Invitation, PasswordResetToken } from '../../shared/types.js';
 
 const { Pool } = pg;
 
@@ -69,9 +70,9 @@ export class PostgresService {
     const isProduction = process.env.NODE_ENV === 'production';
 
     if (!databaseUrl) {
-      if (isProduction && process.env.STRICT_PRODUCTION_DB === 'true') {
+      if (isProduction) {
         const errorMsg =
-          '[FATAL] Configuração obrigatória DATABASE_URL ausente em ambiente de produção com STRICT_PRODUCTION_DB ativado. Fail-closed acionado.';
+          '[FATAL] Configuração obrigatória DATABASE_URL ausente em ambiente de produção (NODE_ENV=production). Fail-closed acionado. A aplicação não pode operar em produção sem PostgreSQL.';
         logger.error(errorMsg);
         throw new Error(errorMsg);
       }
@@ -106,8 +107,8 @@ export class PostgresService {
 
       return true;
     } catch (err: any) {
-      if (isProduction && process.env.STRICT_PRODUCTION_DB === 'true') {
-        const errorMsg = `[FATAL] Falha de conexão ao PostgreSQL em ambiente de produção com STRICT_PRODUCTION_DB ativado: ${err.message}. Fail-closed acionado.`;
+      if (isProduction) {
+        const errorMsg = `[FATAL] Falha de conexão ao PostgreSQL em ambiente de produção (NODE_ENV=production): ${err.message}. Fail-closed acionado.`;
         logger.error(errorMsg);
         this.isConnected = false;
         throw new Error(errorMsg);
@@ -747,6 +748,13 @@ export class PostgresService {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
+        -- 22. Sequenciais Concorrentes Multi-Tenant (PRD 01 & 04)
+        CREATE TABLE IF NOT EXISTS "${schemaName}".sequential_counters (
+          counter_type TEXT PRIMARY KEY,
+          current_value BIGINT NOT NULL DEFAULT 0,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
         -- Índices de Desempenho e Integridade do Tenant
         CREATE INDEX IF NOT EXISTS "idx_${schemaName}_partners_doc" ON "${schemaName}".partners(document);
         CREATE INDEX IF NOT EXISTS "idx_${schemaName}_products_code" ON "${schemaName}".products(code);
@@ -867,18 +875,250 @@ export class PostgresService {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
 
+        CREATE TABLE IF NOT EXISTS cp_password_resets (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          user_id UUID NOT NULL REFERENCES cp_users(id),
+          email TEXT NOT NULL,
+          token TEXT NOT NULL UNIQUE,
+          expires_at TIMESTAMPTZ NOT NULL,
+          is_used BOOLEAN NOT NULL DEFAULT false,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS cp_invitations (
+          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          company_id UUID NOT NULL REFERENCES cp_companies(id),
+          company_name TEXT NOT NULL,
+          email TEXT NOT NULL,
+          role TEXT NOT NULL,
+          invited_by_user_id TEXT NOT NULL,
+          invited_by_name TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'PENDING',
+          token TEXT NOT NULL UNIQUE,
+          expires_at TIMESTAMPTZ NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
         CREATE INDEX IF NOT EXISTS idx_cp_users_email ON cp_users(email);
         CREATE INDEX IF NOT EXISTS idx_cp_companies_clean_cnpj ON cp_companies(clean_cnpj);
         CREATE INDEX IF NOT EXISTS idx_cp_memberships_user ON cp_memberships(user_id);
         CREATE INDEX IF NOT EXISTS idx_cp_memberships_company ON cp_memberships(company_id);
         CREATE INDEX IF NOT EXISTS idx_cp_sessions_token ON cp_sessions(token_hash);
         CREATE INDEX IF NOT EXISTS idx_cp_refresh_tokens_hash ON cp_refresh_tokens(token_hash);
+        CREATE INDEX IF NOT EXISTS idx_cp_password_resets_token ON cp_password_resets(token);
+        CREATE INDEX IF NOT EXISTS idx_cp_invitations_token ON cp_invitations(token);
       `);
 
       logger.info('[PostgresService] Tabelas globais do Control Plane inicializadas com sucesso.');
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Obtém o próximo número sequencial atômico e seguro contra concorrência para o schema do tenant (PRD 01 & 04)
+   */
+  static async getNextSequential(
+    cleanCnpj: string,
+    counterType: string,
+    client?: pg.PoolClient
+  ): Promise<number> {
+    const sanitizedCnpj = cleanCnpj.replace(/\D/g, '');
+    const schemaName = `tenant_${sanitizedCnpj}`;
+    const query = `
+      INSERT INTO "${schemaName}".sequential_counters (counter_type, current_value, updated_at)
+      VALUES ($1, 1, NOW())
+      ON CONFLICT (counter_type) DO UPDATE
+      SET current_value = "${schemaName}".sequential_counters.current_value + 1,
+          updated_at = NOW()
+      RETURNING current_value;
+    `;
+
+    if (client) {
+      const res = await client.query(query, [counterType]);
+      return parseInt(res.rows[0].current_value, 10);
+    }
+
+    return this.withTenantClient(cleanCnpj, async (c) => {
+      const res = await c.query(query, [counterType]);
+      return parseInt(res.rows[0].current_value, 10);
+    });
+  }
+
+  /**
+   * Persiste solicitação de recuperação de senha no Control Plane (PRD 02 - Seção 15)
+   */
+  static async savePasswordReset(reset: PasswordResetToken): Promise<void> {
+    await this.withControlPlaneClient(async (client) => {
+      await client.query(
+        `INSERT INTO cp_password_resets (
+          id, user_id, email, token, expires_at, is_used, created_at
+        ) VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7)`,
+        [
+          reset.id && reset.id.includes('-') && reset.id.length >= 32 ? reset.id : null,
+          reset.userId,
+          reset.email.toLowerCase().trim(),
+          reset.token,
+          reset.expiresAt,
+          reset.isUsed || false,
+          reset.createdAt || new Date().toISOString(),
+        ]
+      );
+    });
+  }
+
+  /**
+   * Recupera token de reset válido e não expirado
+   */
+  static async getPasswordReset(token: string): Promise<PasswordResetToken | undefined> {
+    return this.withControlPlaneClient(async (client) => {
+      const res = await client.query(
+        'SELECT * FROM cp_password_resets WHERE token = $1 AND is_used = false AND expires_at > NOW() LIMIT 1',
+        [token]
+      );
+      if (res.rows.length === 0) return undefined;
+      const r = res.rows[0];
+      return {
+        id: r.id,
+        userId: r.user_id,
+        email: r.email,
+        token: r.token,
+        expiresAt: r.expires_at.toISOString(),
+        isUsed: r.is_used,
+        createdAt: r.created_at.toISOString(),
+      };
+    });
+  }
+
+  /**
+   * Consome token de reset utilizado
+   */
+  static async consumePasswordReset(token: string): Promise<void> {
+    await this.withControlPlaneClient(async (client) => {
+      await client.query(
+        'UPDATE cp_password_resets SET is_used = true WHERE token = $1',
+        [token]
+      );
+    });
+  }
+
+  /**
+   * Persiste convite corporativo no Control Plane (PRD 02 - Seção 40)
+   */
+  static async createInvitation(inv: Invitation): Promise<Invitation> {
+    return this.withControlPlaneClient(async (client) => {
+      const res = await client.query(
+        `INSERT INTO cp_invitations (
+          id, company_id, company_name, email, role, invited_by_user_id,
+          invited_by_name, status, token, expires_at, created_at
+        ) VALUES (COALESCE($1, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+        [
+          inv.id && inv.id.includes('-') && inv.id.length >= 32 ? inv.id : null,
+          inv.companyId,
+          inv.companyName,
+          inv.email.toLowerCase().trim(),
+          inv.role,
+          inv.invitedByUserId,
+          inv.invitedByName,
+          inv.status || 'PENDING',
+          inv.token,
+          inv.expiresAt,
+          inv.createdAt || new Date().toISOString(),
+        ]
+      );
+      const r = res.rows[0];
+      return {
+        id: r.id,
+        companyId: r.company_id,
+        companyName: r.company_name,
+        email: r.email,
+        role: r.role,
+        invitedByUserId: r.invited_by_user_id,
+        invitedByName: r.invited_by_name,
+        status: r.status,
+        token: r.token,
+        expiresAt: r.expires_at.toISOString(),
+        createdAt: r.created_at.toISOString(),
+      };
+    });
+  }
+
+  /**
+   * Lista convites pendentes de uma empresa
+   */
+  static async listInvitationsForCompany(companyId: string): Promise<Invitation[]> {
+    return this.withControlPlaneClient(async (client) => {
+      const res = await client.query(
+        "SELECT * FROM cp_invitations WHERE company_id = $1 AND status = 'PENDING' ORDER BY created_at DESC",
+        [companyId]
+      );
+      return res.rows.map((r) => ({
+        id: r.id,
+        companyId: r.company_id,
+        companyName: r.company_name,
+        email: r.email,
+        role: r.role,
+        invitedByUserId: r.invited_by_user_id,
+        invitedByName: r.invited_by_name,
+        status: r.status,
+        token: r.token,
+        expiresAt: r.expires_at.toISOString(),
+        createdAt: r.created_at.toISOString(),
+      }));
+    });
+  }
+
+  /**
+   * Busca convite por token pendente
+   */
+  static async getInvitationByToken(token: string): Promise<Invitation | undefined> {
+    return this.withControlPlaneClient(async (client) => {
+      const res = await client.query(
+        "SELECT * FROM cp_invitations WHERE token = $1 AND status = 'PENDING' LIMIT 1",
+        [token]
+      );
+      if (res.rows.length === 0) return undefined;
+      const r = res.rows[0];
+      return {
+        id: r.id,
+        companyId: r.company_id,
+        companyName: r.company_name,
+        email: r.email,
+        role: r.role,
+        invitedByUserId: r.invited_by_user_id,
+        invitedByName: r.invited_by_name,
+        status: r.status,
+        token: r.token,
+        expiresAt: r.expires_at.toISOString(),
+        createdAt: r.created_at.toISOString(),
+      };
+    });
+  }
+
+  /**
+   * Revoga convite
+   */
+  static async revokeInvitation(inviteId: string): Promise<boolean> {
+    return this.withControlPlaneClient(async (client) => {
+      const res = await client.query(
+        "UPDATE cp_invitations SET status = 'REVOKED' WHERE id = $1",
+        [inviteId]
+      );
+      return (res.rowCount ?? 0) > 0;
+    });
+  }
+
+  /**
+   * Marca convite como aceito
+   */
+  static async acceptInvitation(token: string): Promise<boolean> {
+    return this.withControlPlaneClient(async (client) => {
+      const res = await client.query(
+        "UPDATE cp_invitations SET status = 'ACCEPTED' WHERE token = $1",
+        [token]
+      );
+      return (res.rowCount ?? 0) > 0;
+    });
   }
 
   /**

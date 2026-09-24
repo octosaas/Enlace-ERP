@@ -7,6 +7,8 @@ import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { dbEngine } from '../database/engine.js';
+import { PostgresService } from '../database/postgres.js';
+import { RepositoryManager } from '../database/repositories/index.js';
 import { UnauthorizedError, ForbiddenError, AppError } from '../errors/index.js';
 import { User, Company, Membership, UserSession, RefreshToken } from '../../shared/types.js';
 import { TotpService } from '../security/totp.js';
@@ -203,7 +205,7 @@ export class AuthService {
       lastActivityAt: new Date().toISOString(),
     };
 
-    dbEngine.createSession(session);
+    await dbEngine.createSessionAsync(session);
 
     // Salva o Refresh Token associado (PRD 02 - Seção 13)
     const storedRt: RefreshToken = {
@@ -216,7 +218,7 @@ export class AuthService {
       createdAt: new Date().toISOString(),
       expiresAt: refreshExpiresAt,
     };
-    dbEngine.saveRefreshToken(storedRt);
+    await dbEngine.saveRefreshTokenAsync(storedRt);
 
     return {
       token,
@@ -297,7 +299,7 @@ export class AuthService {
     // Detecção de Reúso de Refresh Token (Alerta de Ataque / Token Hijacking)
     if (storedRt.isUsed) {
       // Invalida toda a árvore de sessões do usuário imediatamente por segurança!
-      dbEngine.revokeAllSessionsForUser(storedRt.userId);
+      await dbEngine.revokeAllSessionsForUserAsync(storedRt.userId);
 
       AuditService.recordSecurityEvent({
         type: 'SECURITY_TOKEN_REUSE_DETECTED',
@@ -348,7 +350,7 @@ export class AuthService {
     const newRefreshTokenHash = crypto.createHash('sha256').update(newRefreshTokenPlain).digest('hex');
 
     // Marca o token anterior como consumido
-    dbEngine.markRefreshTokenUsed(tokenHash, newRefreshTokenHash);
+    await dbEngine.markRefreshTokenUsedAsync(tokenHash, newRefreshTokenHash);
 
     // Salva o novo refresh token
     const newRtRecord: RefreshToken = {
@@ -361,7 +363,7 @@ export class AuthService {
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + REFRESH_TOKEN_DAYS * 24 * 60 * 60 * 1000).toISOString(),
     };
-    dbEngine.saveRefreshToken(newRtRecord);
+    await dbEngine.saveRefreshTokenAsync(newRtRecord);
 
     return {
       token: newAccessToken,
@@ -425,17 +427,20 @@ export class AuthService {
       throw new AppError('A nova senha deve possuir pelo menos 8 caracteres.', 400);
     }
 
-    const resetRecord = dbEngine.getPasswordReset(token);
+    const resetRecord = await dbEngine.getPasswordResetAsync(token);
     if (!resetRecord) {
       throw new UnauthorizedError('Token de recuperação de senha inválido ou expirado.');
     }
 
     const newHash = await bcrypt.hash(newPasswordPlain, 10);
     dbEngine.updateUser(resetRecord.userId, { passwordHash: newHash });
-    dbEngine.consumePasswordReset(token);
+    if (PostgresService.isDbConnected()) {
+      await RepositoryManager.getInstance().getRepositories().users.update(resetRecord.userId, { passwordHash: newHash });
+    }
+    await dbEngine.consumePasswordResetAsync(token);
 
     // Invalida todas as sessões do usuário para garantir revogação total
-    dbEngine.revokeAllSessionsForUser(resetRecord.userId);
+    await dbEngine.revokeAllSessionsForUserAsync(resetRecord.userId);
 
     return true;
   }
@@ -458,6 +463,9 @@ export class AuthService {
 
     const newHash = await bcrypt.hash(newPasswordPlain, 10);
     dbEngine.updateUser(userId, { passwordHash: newHash });
+    if (PostgresService.isDbConnected()) {
+      await RepositoryManager.getInstance().getRepositories().users.update(userId, { passwordHash: newHash });
+    }
 
     return true;
   }

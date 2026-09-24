@@ -99,6 +99,30 @@ export const cpSecurityEvents = pgTable('cp_security_events', {
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 
+export const cpPasswordResets = pgTable('cp_password_resets', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => cpUsers.id),
+  email: text('email').notNull(),
+  token: text('token').notNull().unique(),
+  expiresAt: timestamp('expires_at').notNull(),
+  isUsed: boolean('is_used').default(false).notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const cpInvitations = pgTable('cp_invitations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  companyId: uuid('company_id').notNull().references(() => cpCompanies.id),
+  companyName: text('company_name').notNull(),
+  email: text('email').notNull(),
+  role: text('role').notNull(),
+  invitedByUserId: text('invited_by_user_id').notNull(),
+  invitedByName: text('invited_by_name').notNull(),
+  status: text('status').default('PENDING').notNull(),
+  token: text('token').notNull().unique(),
+  expiresAt: timestamp('expires_at').notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
 // ==========================================
 // 2. ESTRUTURAS OPERACIONAIS DO TENANT (Por CNPJ)
 // Replicadas e executadas dentro do schema dedicado: "tenant_<cleanCnpj>"
@@ -580,5 +604,12 @@ export const tenantAccountsPayable = pgTable('accounts_payable', {
   description: text('description'),
   paidAt: timestamp('paid_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
+// Sequenciais Concorrentes Multi-Tenant (PRD 01 & 04)
+export const tenantSequentialCounters = pgTable('sequential_counters', {
+  counterType: text('counter_type').primaryKey(),
+  currentValue: integer('current_value').notNull().default(0),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });

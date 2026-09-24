@@ -188,16 +188,19 @@ export class EnlaceSandboxAdapter implements PaymentProvider {
       `evt_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
 
     const eventType = rawPayload.event || rawPayload.type || 'PAYMENT_CONFIRMED';
-    const isValid = !config.webhookSecret || headers?.['x-webhook-secret'] === config.webhookSecret || true;
-
-    if (!isValid) {
-      return {
-        isValid: false,
-        externalEventId,
-        eventType,
-        rejectionReason: 'Assinatura ou secret de webhook inválido.',
-        rawPayload,
-      };
+    
+    // Verificação estrita do secret de webhook quando configurado
+    if (config.webhookSecret) {
+      const token = headers?.['x-webhook-secret'] || headers?.['authorization'];
+      if (token !== config.webhookSecret) {
+        return {
+          isValid: false,
+          externalEventId,
+          eventType,
+          rejectionReason: 'Assinatura ou secret de webhook inválido.',
+          rawPayload,
+        };
+      }
     }
 
     const externalId =

@@ -136,6 +136,12 @@ import { PostgresService } from './postgres.js';
 import { RepositoryManager } from './repositories/index.js';
 import { DatabaseSeeder } from './seed.js';
 
+/**
+ * @deprecated [LEGACY / TEST FIXTURE & LOCAL CACHE ONLY]
+ * O TenantStorage NÃO é o Source of Truth de produção.
+ * O Source of Truth definitivo e autoritativo do Enlace ERP é o PostgreSQL + Drizzle ORM.
+ * Esta interface é mantida estritamente para compatibilidade de testes locais (CI) e cache derivado transitório.
+ */
 export interface TenantStorage {
   settings: {
     timezone: string;
@@ -254,8 +260,12 @@ class DatabaseEngine {
 
     logger.info('[DatabaseEngine] Inicializando motor de banco de dados e schemas isolados (PRD 01 & 02)...');
 
-    // Seed inicial seguro para demonstração e validação do PRD 01 e 02
-    const passwordHash = await bcrypt.hash('Enlace#2026!Master', 10);
+    const isProduction = process.env.NODE_ENV === 'production';
+    const seedDemo = !isProduction && process.env.SEED_DEMO_DATA !== 'false';
+
+    if (seedDemo) {
+      // Seed inicial seguro para demonstração e validação do PRD 01 e 02
+      const passwordHash = await bcrypt.hash('Enlace#2026!Master', 10);
 
     // 1. Usuários de Teste (Global)
     const userAna: StoredUser = {
@@ -2654,6 +2664,7 @@ class DatabaseEngine {
       createdAt: new Date().toISOString(),
     };
     this.invitations.set(sampleInvite.id, sampleInvite);
+    }
 
     this.isInitialized = true;
     logger.info('[DatabaseEngine] Banco de dados inicializado com sucesso (PRD 01 & 02).');
@@ -2680,8 +2691,8 @@ class DatabaseEngine {
         getTenantStorage: (cnpj) => this.getTenantStorage(cnpj),
       });
     } catch (err: any) {
-      if (process.env.NODE_ENV === 'production' && process.env.STRICT_PRODUCTION_DB === 'true') {
-        logger.error(`[DatabaseEngine] [FATAL] Falha de inicialização PostgreSQL em produção com STRICT_PRODUCTION_DB: ${err.message}`);
+      if (process.env.NODE_ENV === 'production') {
+        logger.error(`[DatabaseEngine] [FATAL] Falha de inicialização PostgreSQL em produção: ${err.message}`);
         throw err;
       }
       logger.warn(`[DatabaseEngine] Aviso na sincronização PostgreSQL: ${err.message}`);
@@ -2758,6 +2769,20 @@ class DatabaseEngine {
 
   createSession(session: UserSession): UserSession {
     this.sessions.set(session.id, session);
+    if (PostgresService.isDbConnected()) {
+      RepositoryManager.getInstance()
+        .getRepositories()
+        .sessions.create(session)
+        .catch((err) => logger.error('[DatabaseEngine] Falha ao persistir sessão no PostgreSQL:', err));
+    }
+    return session;
+  }
+
+  async createSessionAsync(session: UserSession): Promise<UserSession> {
+    this.sessions.set(session.id, session);
+    if (PostgresService.isDbConnected()) {
+      await RepositoryManager.getInstance().getRepositories().sessions.create(session);
+    }
     return session;
   }
 
@@ -2796,7 +2821,23 @@ class DatabaseEngine {
         this.refreshTokens.set(id, rt);
       }
     }
+
+    if (PostgresService.isDbConnected()) {
+      RepositoryManager.getInstance()
+        .getRepositories()
+        .sessions.revoke(sessionId)
+        .catch((err) => logger.error('[DatabaseEngine] Falha ao revogar sessão no PostgreSQL:', err));
+    }
+
     return true;
+  }
+
+  async revokeSessionAsync(sessionId: string): Promise<boolean> {
+    const res = this.revokeSession(sessionId);
+    if (PostgresService.isDbConnected()) {
+      await RepositoryManager.getInstance().getRepositories().sessions.revoke(sessionId);
+    }
+    return res;
   }
 
   revokeAllSessionsForUser(userId: string, exceptSessionId?: string): number {
@@ -2818,6 +2859,21 @@ class DatabaseEngine {
       }
     }
 
+    if (PostgresService.isDbConnected()) {
+      RepositoryManager.getInstance()
+        .getRepositories()
+        .sessions.revokeAllForUser(userId)
+        .catch((err) => logger.error('[DatabaseEngine] Falha ao revogar sessões no PostgreSQL:', err));
+    }
+
+    return count;
+  }
+
+  async revokeAllSessionsForUserAsync(userId: string, exceptSessionId?: string): Promise<number> {
+    const count = this.revokeAllSessionsForUser(userId, exceptSessionId);
+    if (PostgresService.isDbConnected()) {
+      await RepositoryManager.getInstance().getRepositories().sessions.revokeAllForUser(userId);
+    }
     return count;
   }
 
@@ -2825,6 +2881,19 @@ class DatabaseEngine {
 
   saveRefreshToken(token: RefreshToken) {
     this.refreshTokens.set(token.tokenHash, token);
+    if (PostgresService.isDbConnected()) {
+      RepositoryManager.getInstance()
+        .getRepositories()
+        .sessions.saveRefreshToken(token)
+        .catch((err) => logger.error('[DatabaseEngine] Falha ao salvar refresh token no PostgreSQL:', err));
+    }
+  }
+
+  async saveRefreshTokenAsync(token: RefreshToken): Promise<void> {
+    this.refreshTokens.set(token.tokenHash, token);
+    if (PostgresService.isDbConnected()) {
+      await RepositoryManager.getInstance().getRepositories().sessions.saveRefreshToken(token);
+    }
   }
 
   getRefreshToken(tokenHash: string): RefreshToken | undefined {
@@ -2838,12 +2907,38 @@ class DatabaseEngine {
       rt.replacedByTokenHash = replacedByHash;
       this.refreshTokens.set(tokenHash, rt);
     }
+    if (PostgresService.isDbConnected()) {
+      RepositoryManager.getInstance()
+        .getRepositories()
+        .sessions.consumeRefreshToken(tokenHash, replacedByHash)
+        .catch((err) => logger.error('[DatabaseEngine] Falha ao consumir refresh token no PostgreSQL:', err));
+    }
+  }
+
+  async markRefreshTokenUsedAsync(tokenHash: string, replacedByHash: string): Promise<void> {
+    this.markRefreshTokenUsed(tokenHash, replacedByHash);
+    if (PostgresService.isDbConnected()) {
+      await RepositoryManager.getInstance().getRepositories().sessions.consumeRefreshToken(tokenHash, replacedByHash);
+    }
   }
 
   // --- CONVITES (PRD 02 - Seção 40) ---
 
   createInvitation(invitation: Invitation): Invitation {
     this.invitations.set(invitation.id, invitation);
+    if (PostgresService.isDbConnected()) {
+      PostgresService.createInvitation(invitation).catch((err) =>
+        logger.error('[DatabaseEngine] Falha ao persistir convite no PostgreSQL:', err)
+      );
+    }
+    return invitation;
+  }
+
+  async createInvitationAsync(invitation: Invitation): Promise<Invitation> {
+    this.invitations.set(invitation.id, invitation);
+    if (PostgresService.isDbConnected()) {
+      return await PostgresService.createInvitation(invitation);
+    }
     return invitation;
   }
 
@@ -2862,7 +2957,20 @@ class DatabaseEngine {
     if (!inv) return false;
     inv.status = 'REVOKED';
     this.invitations.set(inviteId, inv);
+    if (PostgresService.isDbConnected()) {
+      PostgresService.revokeInvitation(inviteId).catch((err) =>
+        logger.error('[DatabaseEngine] Falha ao revogar convite no PostgreSQL:', err)
+      );
+    }
     return true;
+  }
+
+  async revokeInvitationAsync(inviteId: string): Promise<boolean> {
+    const res = this.revokeInvitation(inviteId);
+    if (PostgresService.isDbConnected()) {
+      await PostgresService.revokeInvitation(inviteId);
+    }
+    return res;
   }
 
   acceptInvitation(token: string, user: User): Membership | undefined {
@@ -2890,6 +2998,17 @@ class DatabaseEngine {
     };
 
     this.memberships.set(membership.id, membership);
+
+    if (PostgresService.isDbConnected()) {
+      PostgresService.acceptInvitation(token).catch((err) =>
+        logger.error('[DatabaseEngine] Falha ao aceitar convite no PostgreSQL:', err)
+      );
+      RepositoryManager.getInstance()
+        .getRepositories()
+        .memberships.create(membership)
+        .catch((err) => logger.error('[DatabaseEngine] Falha ao persistir membership no PostgreSQL:', err));
+    }
+
     return membership;
   }
 
@@ -2897,6 +3016,18 @@ class DatabaseEngine {
 
   savePasswordReset(reset: PasswordResetToken) {
     this.passwordResets.set(reset.token, reset);
+    if (PostgresService.isDbConnected()) {
+      PostgresService.savePasswordReset(reset).catch((err) =>
+        logger.error('[DatabaseEngine] Falha ao salvar recuperação de senha no PostgreSQL:', err)
+      );
+    }
+  }
+
+  async savePasswordResetAsync(reset: PasswordResetToken): Promise<void> {
+    this.passwordResets.set(reset.token, reset);
+    if (PostgresService.isDbConnected()) {
+      await PostgresService.savePasswordReset(reset);
+    }
   }
 
   getPasswordReset(token: string): PasswordResetToken | undefined {
@@ -2907,11 +3038,31 @@ class DatabaseEngine {
     return pr;
   }
 
+  async getPasswordResetAsync(token: string): Promise<PasswordResetToken | undefined> {
+    if (PostgresService.isDbConnected()) {
+      const fromDb = await PostgresService.getPasswordReset(token);
+      if (fromDb) return fromDb;
+    }
+    return this.getPasswordReset(token);
+  }
+
   consumePasswordReset(token: string) {
     const pr = this.passwordResets.get(token);
     if (pr) {
       pr.isUsed = true;
       this.passwordResets.set(token, pr);
+    }
+    if (PostgresService.isDbConnected()) {
+      PostgresService.consumePasswordReset(token).catch((err) =>
+        logger.error('[DatabaseEngine] Falha ao consumir recuperação de senha no PostgreSQL:', err)
+      );
+    }
+  }
+
+  async consumePasswordResetAsync(token: string): Promise<void> {
+    this.consumePasswordReset(token);
+    if (PostgresService.isDbConnected()) {
+      await PostgresService.consumePasswordReset(token);
     }
   }
 
@@ -3393,17 +3544,6 @@ class DatabaseEngine {
       updatedAt: new Date().toISOString(),
     };
     tenant.partners.unshift(newPartner);
-    const cleanCnpj = schemaNamespace.replace('tenant_', '');
-    try {
-      RepositoryManager.getInstance().getRepositories().partners.create(cleanCnpj, newPartner).catch((err) => {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de parceiro: ${err.message}`, {
-          cleanCnpj,
-          partnerId: newPartner.id,
-        });
-      });
-    } catch {
-      // Ignora se repositório não inicializado
-    }
     return newPartner;
   }
 
@@ -3411,12 +3551,47 @@ class DatabaseEngine {
     schemaNamespace: string,
     partnerData: Omit<BusinessPartner, 'id' | 'createdAt' | 'updatedAt' | 'formattedDocument'>
   ): Promise<BusinessPartner> {
-    const partner = this.createPartner(schemaNamespace, partnerData);
-    if (PostgresService.isDbConnected()) {
-      const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      await RepositoryManager.getInstance().getRepositories().partners.create(cleanCnpj, partner);
+    const clean = cleanDocument(partnerData.document);
+    const newPartner: BusinessPartner = {
+      ...partnerData,
+      id: `ptn-${crypto.randomUUID()}`,
+      document: clean,
+      formattedDocument: formatDocument(clean),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    const persisted = await RepositoryManager.getInstance().getRepositories().partners.create(cleanCnpj, newPartner);
+
+    const tenant = this.tenantSchemas.get(schemaNamespace);
+    if (tenant) {
+      const idx = tenant.partners.findIndex((p) => p.id === persisted.id);
+      if (idx >= 0) {
+        tenant.partners[idx] = persisted;
+      } else {
+        tenant.partners.unshift(persisted);
+      }
     }
-    return partner;
+    return persisted;
+  }
+
+  async listPartnersAsync(
+    schemaNamespace: string,
+    query?: { search?: string; role?: string; status?: string }
+  ): Promise<BusinessPartner[]> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().partners.list(cleanCnpj, query);
+    }
+    return this.listPartners(schemaNamespace, query);
+  }
+
+  async getPartnerByIdAsync(schemaNamespace: string, partnerId: string): Promise<BusinessPartner | undefined> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().partners.findById(cleanCnpj, partnerId);
+    }
+    return this.getPartnerById(schemaNamespace, partnerId);
   }
 
   updatePartner(
@@ -3443,17 +3618,6 @@ class DatabaseEngine {
     };
 
     tenant.partners[index] = updated;
-    const cleanCnpj = schemaNamespace.replace('tenant_', '');
-    try {
-      RepositoryManager.getInstance().getRepositories().partners.update(cleanCnpj, partnerId, updates).catch((err) => {
-        logger.error(`[DatabaseEngine] Falha na atualização PostgreSQL de parceiro: ${err.message}`, {
-          cleanCnpj,
-          partnerId,
-        });
-      });
-    } catch {
-      // Ignora se repositório não inicializado
-    }
     return updated;
   }
 
@@ -3462,10 +3626,19 @@ class DatabaseEngine {
     partnerId: string,
     updates: Partial<Omit<BusinessPartner, 'id' | 'createdAt' | 'updatedAt'>>
   ): Promise<BusinessPartner | undefined> {
-    const updated = this.updatePartner(schemaNamespace, partnerId, updates);
-    if (updated && PostgresService.isDbConnected()) {
-      const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      await RepositoryManager.getInstance().getRepositories().partners.update(cleanCnpj, partnerId, updates);
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    const clean = updates.document ? cleanDocument(updates.document) : undefined;
+    const cleanUpdates = {
+      ...updates,
+      ...(clean ? { document: clean, formattedDocument: formatDocument(clean) } : {}),
+    };
+    const updated = await RepositoryManager.getInstance().getRepositories().partners.update(cleanCnpj, partnerId, cleanUpdates);
+    if (updated) {
+      const tenant = this.tenantSchemas.get(schemaNamespace);
+      if (tenant) {
+        const idx = tenant.partners.findIndex((p) => p.id === partnerId);
+        if (idx !== -1) tenant.partners[idx] = updated;
+      }
     }
     return updated;
   }
@@ -3478,25 +3651,18 @@ class DatabaseEngine {
     if (index === -1) return false;
 
     tenant.partners.splice(index, 1);
-    const cleanCnpj = schemaNamespace.replace('tenant_', '');
-    try {
-      RepositoryManager.getInstance().getRepositories().partners.delete(cleanCnpj, partnerId).catch((err) => {
-        logger.error(`[DatabaseEngine] Falha na exclusão PostgreSQL de parceiro: ${err.message}`, {
-          cleanCnpj,
-          partnerId,
-        });
-      });
-    } catch {
-      // Ignora se repositório não inicializado
-    }
     return true;
   }
 
   async deletePartnerAsync(schemaNamespace: string, partnerId: string): Promise<boolean> {
-    const deleted = this.deletePartner(schemaNamespace, partnerId);
-    if (deleted && PostgresService.isDbConnected()) {
-      const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      await RepositoryManager.getInstance().getRepositories().partners.delete(cleanCnpj, partnerId);
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    const deleted = await RepositoryManager.getInstance().getRepositories().partners.delete(cleanCnpj, partnerId);
+    if (deleted) {
+      const tenant = this.tenantSchemas.get(schemaNamespace);
+      if (tenant) {
+        const index = tenant.partners.findIndex((p) => p.id === partnerId);
+        if (index !== -1) tenant.partners.splice(index, 1);
+      }
     }
     return deleted;
   }
@@ -3646,6 +3812,69 @@ class DatabaseEngine {
     return `${prefixMap[type]}-${String(count).padStart(6, '0')}`;
   }
 
+  /**
+   * Gera numeração sequencial atômica persistida no PostgreSQL protegida contra concorrência
+   */
+  async getNextSequentialNumberAsync(
+    schemaNamespace: string,
+    type:
+      | 'quote'
+      | 'sale'
+      | 'contract'
+      | 'serviceOrder'
+      | 'receivable'
+      | 'payable'
+      | 'billing'
+      | 'inventoryMovement'
+      | 'warehouse'
+      | 'fiscalNFe'
+      | 'fiscalNFSe'
+      | 'fiscalNFCe'
+      | 'purchaseRequisition'
+      | 'purchaseQuotation'
+      | 'purchaseOrder'
+      | 'inboundInvoice'
+      | 'bankSlip'
+      | 'cnabRemessa'
+  ): Promise<string> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    const prefixMap: Record<string, string> = {
+      quote: 'ORC',
+      sale: 'VEN',
+      contract: 'CTR',
+      serviceOrder: 'OS',
+      receivable: 'REC',
+      payable: 'PAG',
+      billing: 'FAT',
+      inventoryMovement: 'MOV',
+      warehouse: 'DEP',
+      fiscalNFe: 'NFE',
+      fiscalNFSe: 'NFS',
+      fiscalNFCe: 'NFC',
+      purchaseRequisition: 'RC',
+      purchaseQuotation: 'COT',
+      purchaseOrder: 'PC',
+      inboundInvoice: 'DOC',
+      bankSlip: 'BOL',
+      cnabRemessa: 'REM',
+    };
+    const prefix = prefixMap[type] || type.toUpperCase();
+
+    if (PostgresService.isDbConnected()) {
+      const val = await PostgresService.getNextSequential(cleanCnpj, type);
+      return `${prefix}-${String(val).padStart(6, '0')}`;
+    }
+
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+    if (!storage.sequentialCounters) {
+      storage.sequentialCounters = {} as any;
+    }
+    const current = (storage.sequentialCounters as any)[type] || 0;
+    (storage.sequentialCounters as any)[type] = current + 1;
+    return `${prefix}-${String(current + 1).padStart(6, '0')}`;
+  }
+
   // --- CATÁLOGO DE PRODUTOS E SERVIÇOS ---
 
   listProducts(schemaNamespace: string): Product[] {
@@ -3675,17 +3904,6 @@ class DatabaseEngine {
       updatedAt: now,
     };
     storage.products.push(product);
-    const cleanCnpj = schemaNamespace.replace('tenant_', '');
-    try {
-      RepositoryManager.getInstance().getRepositories().products.create(cleanCnpj, product).catch((err) => {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de produto: ${err.message}`, {
-          cleanCnpj,
-          productId: product.id,
-        });
-      });
-    } catch {
-      // Ignora se repositório não inicializado
-    }
     return product;
   }
 
@@ -3693,12 +3911,39 @@ class DatabaseEngine {
     schemaNamespace: string,
     data: Omit<Product, 'id' | 'createdAt' | 'updatedAt'>
   ): Promise<Product> {
-    const product = this.createProduct(schemaNamespace, data);
-    if (PostgresService.isDbConnected()) {
-      const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      await RepositoryManager.getInstance().getRepositories().products.create(cleanCnpj, product);
+    const now = new Date().toISOString();
+    const product: Product = {
+      ...data,
+      id: `prd-${crypto.randomUUID()}`,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    const persisted = await RepositoryManager.getInstance().getRepositories().products.create(cleanCnpj, product);
+
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (storage) {
+      const idx = storage.products.findIndex((p) => p.id === persisted.id);
+      if (idx >= 0) storage.products[idx] = persisted;
+      else storage.products.push(persisted);
     }
-    return product;
+    return persisted;
+  }
+
+  async listProductsAsync(schemaNamespace: string): Promise<Product[]> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().products.list(cleanCnpj);
+    }
+    return this.listProducts(schemaNamespace);
+  }
+
+  async getProductByIdAsync(schemaNamespace: string, id: string): Promise<Product | undefined> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().products.findById(cleanCnpj, id);
+    }
+    return this.getProductById(schemaNamespace, id);
   }
 
   updateProduct(
@@ -3719,17 +3964,6 @@ class DatabaseEngine {
       updatedAt: new Date().toISOString(),
     };
     storage.products[index] = updated;
-    const cleanCnpj = schemaNamespace.replace('tenant_', '');
-    try {
-      RepositoryManager.getInstance().getRepositories().products.update(cleanCnpj, id, updates).catch((err) => {
-        logger.error(`[DatabaseEngine] Falha na atualização PostgreSQL de produto: ${err.message}`, {
-          cleanCnpj,
-          id,
-        });
-      });
-    } catch {
-      // Ignora se repositório não inicializado
-    }
     return updated;
   }
 
@@ -3738,10 +3972,14 @@ class DatabaseEngine {
     id: string,
     updates: Partial<Omit<Product, 'id' | 'createdAt'>>
   ): Promise<Product | undefined> {
-    const updated = this.updateProduct(schemaNamespace, id, updates);
-    if (updated && PostgresService.isDbConnected()) {
-      const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      await RepositoryManager.getInstance().getRepositories().products.update(cleanCnpj, id, updates);
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    const updated = await RepositoryManager.getInstance().getRepositories().products.update(cleanCnpj, id, updates);
+    if (updated) {
+      const storage = this.getTenantStorage(schemaNamespace);
+      if (storage) {
+        const idx = storage.products.findIndex((p) => p.id === id);
+        if (idx !== -1) storage.products[idx] = updated;
+      }
     }
     return updated;
   }
@@ -3861,17 +4099,6 @@ class DatabaseEngine {
     };
 
     storage.quotes.unshift(quote);
-    const cleanCnpj = schemaNamespace.replace('tenant_', '');
-    try {
-      RepositoryManager.getInstance().getRepositories().sales.createQuote(cleanCnpj, quote).catch((err) => {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de orçamento: ${err.message}`, {
-          cleanCnpj,
-          quoteId: quote.id,
-        });
-      });
-    } catch {
-      // Ignora se repositório não inicializado
-    }
     return quote;
   }
 
@@ -3879,12 +4106,92 @@ class DatabaseEngine {
     schemaNamespace: string,
     data: Parameters<DatabaseEngine['createQuote']>[1]
   ): Promise<Quote> {
-    const quote = this.createQuote(schemaNamespace, data);
-    if (PostgresService.isDbConnected()) {
-      const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      await RepositoryManager.getInstance().getRepositories().sales.createQuote(cleanCnpj, quote);
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const customer = storage.partners.find((p) => p.id === data.customerId);
+    if (!customer) {
+      throw new Error(`Cliente inválido ou não pertencente ao tenant atual.`);
     }
-    return quote;
+
+    const quoteId = `orc-${crypto.randomUUID()}`;
+    const quoteNumber = this.getNextSequentialNumber(schemaNamespace, 'quote');
+    const now = new Date().toISOString();
+
+    const quoteItems: QuoteItem[] = (data.items || []).map((item, index) => {
+      const calc = CommercialMath.calculateItem(
+        item.quantity,
+        item.unitPrice,
+        item.discount || 0,
+        0,
+        item.surcharge || 0,
+        0
+      );
+      return {
+        id: `item-quote-${crypto.randomUUID()}`,
+        quoteId,
+        itemType: item.itemType,
+        productId: item.productId,
+        serviceId: item.serviceId,
+        description: item.description,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        discount: calc.discount,
+        surcharge: calc.surcharge,
+        total: calc.total,
+        sortOrder: index + 1,
+      };
+    });
+
+    const totals = CommercialMath.calculateDocumentTotals(
+      quoteItems,
+      data.discount || 0,
+      data.surcharge || 0
+    );
+
+    const quote: Quote = {
+      id: quoteId,
+      customerId: customer.id,
+      customerName: customer.name,
+      customerDocument: customer.formattedDocument,
+      number: quoteNumber,
+      status: 'DRAFT',
+      issueDate: data.issueDate || now.split('T')[0],
+      validUntil: data.validUntil,
+      description: data.description,
+      subtotal: totals.subtotal,
+      discount: totals.discount,
+      surcharge: totals.surcharge,
+      total: totals.total,
+      notes: data.notes,
+      internalNotes: data.internalNotes,
+      createdBy: data.createdBy,
+      createdAt: now,
+      updatedAt: now,
+      items: quoteItems,
+    };
+
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    const persisted = await RepositoryManager.getInstance().getRepositories().sales.createQuote(cleanCnpj, quote);
+
+    storage.quotes.unshift(persisted);
+    return persisted;
+  }
+
+  async listQuotesAsync(schemaNamespace: string): Promise<Quote[]> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().sales.listQuotes(cleanCnpj);
+    }
+    return this.listQuotes(schemaNamespace);
+  }
+
+  async getQuoteByIdAsync(schemaNamespace: string, id: string): Promise<Quote | undefined> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().sales.findQuoteById(cleanCnpj, id);
+    }
+    return this.getQuoteById(schemaNamespace, id);
   }
 
   updateQuote(
@@ -3911,17 +4218,6 @@ class DatabaseEngine {
       updatedAt: new Date().toISOString(),
     };
     storage.quotes[index] = updated;
-    const cleanCnpj = schemaNamespace.replace('tenant_', '');
-    try {
-      RepositoryManager.getInstance().getRepositories().sales.updateQuote(cleanCnpj, id, updates).catch((err) => {
-        logger.error(`[DatabaseEngine] Falha na atualização PostgreSQL de orçamento: ${err.message}`, {
-          cleanCnpj,
-          id,
-        });
-      });
-    } catch {
-      // Ignora se repositório não inicializado
-    }
     return updated;
   }
 
@@ -3930,10 +4226,14 @@ class DatabaseEngine {
     id: string,
     updates: Partial<Quote>
   ): Promise<Quote | undefined> {
-    const updated = this.updateQuote(schemaNamespace, id, updates);
-    if (updated && PostgresService.isDbConnected()) {
-      const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      await RepositoryManager.getInstance().getRepositories().sales.updateQuote(cleanCnpj, id, updates);
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    const updated = await RepositoryManager.getInstance().getRepositories().sales.updateQuote(cleanCnpj, id, updates);
+    if (updated) {
+      const storage = this.getTenantStorage(schemaNamespace);
+      if (storage) {
+        const idx = storage.quotes.findIndex((q) => q.id === id);
+        if (idx !== -1) storage.quotes[idx] = updated;
+      }
     }
     return updated;
   }
@@ -4066,27 +4366,6 @@ class DatabaseEngine {
     quote.convertedSaleId = sale.id;
     quote.updatedAt = now;
 
-    const cleanCnpj = schemaNamespace.replace('tenant_', '');
-    try {
-      RepositoryManager.getInstance().getRepositories().sales.createSale(cleanCnpj, sale).catch((err) => {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de venda convertida: ${err.message}`, {
-          cleanCnpj,
-          saleId: sale.id,
-        });
-      });
-      RepositoryManager.getInstance().getRepositories().sales.updateQuote(cleanCnpj, quote.id, {
-        convertedSaleId: sale.id,
-        updatedAt: now,
-      }).catch((err) => {
-        logger.error(`[DatabaseEngine] Falha na atualização PostgreSQL de orçamento convertido: ${err.message}`, {
-          cleanCnpj,
-          quoteId: quote.id,
-        });
-      });
-    } catch {
-      // Ignora se repositório não inicializado
-    }
-
     return { sale, alreadyConverted: false };
   }
 
@@ -4095,16 +4374,98 @@ class DatabaseEngine {
     quoteId: string,
     createdBy: string
   ): Promise<{ sale: Sale; alreadyConverted: boolean }> {
-    const result = this.convertQuoteToSale(schemaNamespace, quoteId, createdBy);
-    if (!result.alreadyConverted && PostgresService.isDbConnected()) {
-      const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      await RepositoryManager.getInstance().getRepositories().sales.createSale(cleanCnpj, result.sale);
-      await RepositoryManager.getInstance().getRepositories().sales.updateQuote(cleanCnpj, quoteId, {
-        convertedSaleId: result.sale.id,
-        updatedAt: result.sale.createdAt,
-      });
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    const storage = this.getTenantStorage(schemaNamespace);
+
+    if (PostgresService.isDbConnected()) {
+      const saleNumber = await this.getNextSequentialNumberAsync(schemaNamespace, 'sale');
+      const persistedSale = await RepositoryManager.getInstance().getRepositories().sales.convertQuoteToSaleTransaction(
+        cleanCnpj,
+        quoteId,
+        saleNumber
+      );
+      if (storage) {
+        const existingIdx = storage.sales.findIndex((s) => s.id === persistedSale.id);
+        if (existingIdx >= 0) {
+          storage.sales[existingIdx] = persistedSale;
+        } else {
+          storage.sales.unshift(persistedSale);
+        }
+        const q = storage.quotes.find((item) => item.id === quoteId);
+        if (q) {
+          q.convertedSaleId = persistedSale.id;
+          q.status = 'APPROVED';
+          q.updatedAt = new Date().toISOString();
+        }
+      }
+      return { sale: persistedSale, alreadyConverted: false };
     }
-    return result;
+
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const quote = storage.quotes.find((q) => q.id === quoteId);
+    if (!quote) throw new Error(`Orçamento [${quoteId}] não encontrado.`);
+
+    if (quote.convertedSaleId) {
+      const existingSale = storage.sales.find((s) => s.id === quote.convertedSaleId);
+      if (existingSale) {
+        return { sale: existingSale, alreadyConverted: true };
+      }
+    }
+
+    const saleId = `ven-${crypto.randomUUID()}`;
+    const saleNumber = this.getNextSequentialNumber(schemaNamespace, 'sale');
+    const now = new Date().toISOString();
+
+    const saleItems: SaleItem[] = quote.items.map((item, index) => ({
+      id: `item-sale-${crypto.randomUUID()}`,
+      saleId,
+      itemType: item.itemType,
+      productId: item.productId,
+      serviceId: item.serviceId,
+      description: item.description,
+      quantity: item.quantity,
+      unitPrice: item.unitPrice,
+      discount: item.discount,
+      surcharge: item.surcharge,
+      total: item.total,
+      sortOrder: index + 1,
+    }));
+
+    const sale: Sale = {
+      id: saleId,
+      customerId: quote.customerId,
+      customerName: quote.customerName,
+      customerDocument: quote.customerDocument,
+      number: saleNumber,
+      status: 'CONFIRMED',
+      saleDate: now.split('T')[0],
+      sourceType: 'QUOTE',
+      sourceId: quote.id,
+      subtotal: quote.subtotal,
+      discount: quote.discount,
+      surcharge: quote.surcharge,
+      total: quote.total,
+      notes: quote.notes ? `Convertido do Orçamento ${quote.number}. ${quote.notes}` : `Convertido do Orçamento ${quote.number}`,
+      internalNotes: quote.internalNotes,
+      confirmedAt: now,
+      createdBy,
+      createdAt: now,
+      updatedAt: now,
+      items: saleItems,
+    };
+
+    const persistedSale = await RepositoryManager.getInstance().getRepositories().sales.createSale(cleanCnpj, sale);
+    await RepositoryManager.getInstance().getRepositories().sales.updateQuote(cleanCnpj, quoteId, {
+      convertedSaleId: persistedSale.id,
+      updatedAt: now,
+    });
+
+    storage.sales.unshift(persistedSale);
+    quote.convertedSaleId = persistedSale.id;
+    quote.updatedAt = now;
+
+    return { sale: persistedSale, alreadyConverted: false };
   }
 
   // --- VENDAS (SALES) ---
@@ -4214,17 +4575,6 @@ class DatabaseEngine {
     };
 
     storage.sales.unshift(sale);
-    const cleanCnpj = schemaNamespace.replace('tenant_', '');
-    try {
-      RepositoryManager.getInstance().getRepositories().sales.createSale(cleanCnpj, sale).catch((err) => {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de venda: ${err.message}`, {
-          cleanCnpj,
-          saleId: sale.id,
-        });
-      });
-    } catch {
-      // Ignora se repositório não inicializado
-    }
     return sale;
   }
 
@@ -4252,12 +4602,93 @@ class DatabaseEngine {
       createdBy: string;
     }
   ): Promise<Sale> {
-    const sale = this.createSale(schemaNamespace, data);
-    if (PostgresService.isDbConnected()) {
-      const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      await RepositoryManager.getInstance().getRepositories().sales.createSale(cleanCnpj, sale);
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) throw new Error(`Schema [${schemaNamespace}] não encontrado.`);
+
+    const customer = storage.partners.find((p) => p.id === data.customerId);
+    if (!customer) {
+      throw new Error(`Cliente inválido ou não pertencente ao tenant atual.`);
     }
-    return sale;
+
+    const saleId = `ven-${crypto.randomUUID()}`;
+    const saleNumber = this.getNextSequentialNumber(schemaNamespace, 'sale');
+    const now = new Date().toISOString();
+
+    const saleItems: SaleItem[] = (data.items || []).map((item, index) => {
+      const calc = CommercialMath.calculateItem(
+        item.quantity,
+        item.unitPrice,
+        item.discount || 0,
+        0,
+        item.surcharge || 0,
+        0
+      );
+      return {
+        id: `item-sale-${crypto.randomUUID()}`,
+        saleId,
+        itemType: item.itemType,
+        productId: item.productId,
+        serviceId: item.serviceId,
+        description: item.description,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        discount: calc.discount,
+        surcharge: calc.surcharge,
+        total: calc.total,
+        sortOrder: index + 1,
+      };
+    });
+
+    const totals = CommercialMath.calculateDocumentTotals(
+      saleItems,
+      data.discount || 0,
+      data.surcharge || 0
+    );
+
+    const sale: Sale = {
+      id: saleId,
+      customerId: customer.id,
+      customerName: customer.name,
+      customerDocument: customer.formattedDocument,
+      number: saleNumber,
+      status: 'CONFIRMED',
+      saleDate: data.saleDate || now.split('T')[0],
+      sourceType: data.sourceType || 'MANUAL',
+      sourceId: data.sourceId,
+      subtotal: totals.subtotal,
+      discount: totals.discount,
+      surcharge: totals.surcharge,
+      total: totals.total,
+      notes: data.notes,
+      internalNotes: data.internalNotes,
+      confirmedAt: now,
+      createdBy: data.createdBy,
+      createdAt: now,
+      updatedAt: now,
+      items: saleItems,
+    };
+
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    const persisted = await RepositoryManager.getInstance().getRepositories().sales.createSale(cleanCnpj, sale);
+
+    storage.sales.unshift(persisted);
+    return persisted;
+  }
+
+  async listSalesAsync(schemaNamespace: string): Promise<Sale[]> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().sales.listSales(cleanCnpj);
+    }
+    return this.listSales(schemaNamespace);
+  }
+
+  async getSaleByIdAsync(schemaNamespace: string, id: string): Promise<Sale | undefined> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().sales.findSaleById(cleanCnpj, id);
+    }
+    return this.getSaleById(schemaNamespace, id);
   }
 
   updateSaleStatus(
@@ -4452,14 +4883,7 @@ class DatabaseEngine {
     const contract = this.createContract(schemaNamespace, data);
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().sales.createContract(cleanCnpj, contract);
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de contrato: ${err.message}`, {
-          cleanCnpj,
-          contractId: contract.id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().sales.createContract(cleanCnpj, contract);
     }
     return contract;
   }
@@ -4647,14 +5071,7 @@ class DatabaseEngine {
     const os = this.createServiceOrder(schemaNamespace, data);
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().sales.createServiceOrder(cleanCnpj, os);
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de ordem de serviço: ${err.message}`, {
-          cleanCnpj,
-          serviceOrderId: os.id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().sales.createServiceOrder(cleanCnpj, os);
     }
     return os;
   }
@@ -4870,30 +5287,22 @@ class DatabaseEngine {
     if (!res) return undefined;
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        const recV2: any = {
-          id: res.receivable.id,
-          instanceId: res.receivable.id,
-          customerId: res.receivable.customerId,
-          customerName: res.receivable.customerName,
-          customerDocument: res.receivable.customerDocument,
-          description: res.receivable.description,
-          originalAmount: res.receivable.originalValue,
-          paidAmount: res.receivable.originalValue - res.receivable.balanceValue,
-          remainingAmount: res.receivable.balanceValue,
-          status: 'OPEN',
-          dueDate: res.receivable.dueDate,
-          createdAt: res.receivable.createdAt,
-          updatedAt: res.receivable.updatedAt,
-        };
-        await RepositoryManager.getInstance().getRepositories().receivables.createReceivable(cleanCnpj, recV2);
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL do título da OS: ${err.message}`, {
-          cleanCnpj,
-          receivableId: res.receivable.id,
-          osId: id,
-        });
-      }
+      const recV2: any = {
+        id: res.receivable.id,
+        instanceId: res.receivable.id,
+        customerId: res.receivable.customerId,
+        customerName: res.receivable.customerName,
+        customerDocument: res.receivable.customerDocument,
+        description: res.receivable.description,
+        originalAmount: res.receivable.originalValue,
+        paidAmount: res.receivable.originalValue - res.receivable.balanceValue,
+        remainingAmount: res.receivable.balanceValue,
+        status: 'OPEN',
+        dueDate: res.receivable.dueDate,
+        createdAt: res.receivable.createdAt,
+        updatedAt: res.receivable.updatedAt,
+      };
+      await RepositoryManager.getInstance().getRepositories().receivables.createReceivable(cleanCnpj, recV2);
     }
     return res;
   }
@@ -5056,35 +5465,6 @@ class DatabaseEngine {
     };
 
     storage.accountsReceivable.unshift(title);
-    const cleanCnpj = schemaNamespace.replace('tenant_', '');
-    try {
-      const recV2: any = {
-        id: title.id,
-        instanceId: title.id,
-        customer: {
-          id: title.customerId,
-          name: title.customerName,
-          document: title.customerDocument,
-        },
-        description: title.description,
-        originalAmount: title.originalValue,
-        paidAmount: title.originalValue - title.balanceValue,
-        remainingAmount: title.balanceValue,
-        status: title.status === 'PAID' ? 'PAID' : title.status === 'PARTIALLY_PAID' ? 'PARTIALLY_PAID' : title.status === 'CANCELED' ? 'CANCELED' : 'OPEN',
-        issueDate: title.issueDate,
-        dueDate: title.dueDate,
-        createdAt: title.createdAt,
-        updatedAt: title.updatedAt,
-      };
-      RepositoryManager.getInstance().getRepositories().receivables.createReceivable(cleanCnpj, recV2).catch((err: any) => {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de conta a receber: ${err.message}`, {
-          cleanCnpj,
-          titleId: title.id,
-        });
-      });
-    } catch {
-      // Ignora se repositório não inicializado
-    }
     return title;
   }
 
@@ -5092,29 +5472,73 @@ class DatabaseEngine {
     schemaNamespace: string,
     data: Partial<AccountReceivable>
   ): Promise<AccountReceivable> {
-    const title = this.createAccountReceivable(schemaNamespace, data);
-    if (PostgresService.isDbConnected()) {
-      const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      const recV2: any = {
-        id: title.id,
-        instanceId: title.id,
-        customer: {
-          id: title.customerId,
-          name: title.customerName,
-          document: title.customerDocument,
-        },
-        description: title.description,
-        originalAmount: title.originalValue,
-        paidAmount: title.originalValue - title.balanceValue,
-        remainingAmount: title.balanceValue,
-        status: title.status === 'PAID' ? 'PAID' : title.status === 'PARTIALLY_PAID' ? 'PARTIALLY_PAID' : title.status === 'CANCELED' ? 'CANCELED' : 'OPEN',
-        issueDate: title.issueDate,
-        dueDate: title.dueDate,
-        createdAt: title.createdAt,
-        updatedAt: title.updatedAt,
-      };
-      await RepositoryManager.getInstance().getRepositories().receivables.createReceivable(cleanCnpj, recV2);
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) {
+      throw new Error(`Schema namespace [${schemaNamespace}] não encontrado.`);
     }
+
+    const recCounter = (storage.sequentialCounters.receivable || 0) + 1;
+    storage.sequentialCounters.receivable = recCounter;
+    const number = `REC-${String(recCounter).padStart(6, '0')}`;
+    const id = `rec-${crypto.randomUUID().slice(0, 8)}`;
+    const now = new Date().toISOString();
+    const originalValue = FinancialMath.round(data.originalValue || 0);
+
+    const title: AccountReceivable = {
+      id,
+      number,
+      customerId: data.customerId || '',
+      customerName: data.customerName || '',
+      customerDocument: data.customerDocument,
+      saleId: data.saleId,
+      saleNumber: data.saleNumber,
+      contractId: data.contractId,
+      contractNumber: data.contractNumber,
+      chartOfAccountId: data.chartOfAccountId || 'coa-alfa-04',
+      chartOfAccountCode: data.chartOfAccountCode || '1.1.2.01',
+      costCenterId: data.costCenterId,
+      costCenterCode: data.costCenterCode,
+      description: data.description || 'Título de Conta a Receber',
+      issueDate: data.issueDate || now.split('T')[0],
+      dueDate: data.dueDate || now.split('T')[0],
+      originalValue,
+      fineRate: data.fineRate !== undefined ? data.fineRate : 2.0,
+      interestRate: data.interestRate !== undefined ? data.interestRate : 1.0,
+      discountValue: data.discountValue || 0,
+      fineValue: data.fineValue || 0,
+      interestValue: data.interestValue || 0,
+      paidValue: 0,
+      balanceValue: originalValue,
+      status: 'OPEN',
+      notes: data.notes,
+      createdBy: data.createdBy || 'Sistema',
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    const recV2: any = {
+      id: title.id,
+      instanceId: title.id,
+      customer: {
+        id: title.customerId,
+        name: title.customerName,
+        document: title.customerDocument,
+      },
+      description: title.description,
+      originalAmount: title.originalValue,
+      paidAmount: 0,
+      remainingAmount: title.balanceValue,
+      status: 'OPEN',
+      issueDate: title.issueDate,
+      dueDate: title.dueDate,
+      createdAt: title.createdAt,
+      updatedAt: title.updatedAt,
+    };
+
+    await RepositoryManager.getInstance().getRepositories().receivables.createReceivable(cleanCnpj, recV2);
+
+    storage.accountsReceivable.unshift(title);
     return title;
   }
 
@@ -5206,24 +5630,17 @@ class DatabaseEngine {
     const title = this.settleAccountReceivable(schemaNamespace, id, data);
     if (title && PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().receivables.updateReceivable(cleanCnpj, id, {
-          remainingAmount: title.balanceValue,
-          paidAmount: title.paidValue,
-          status: title.status === 'PAID' ? 'PAID' : title.status === 'PARTIALLY_PAID' ? 'PARTIALLY_PAID' : title.status === 'CANCELED' ? 'CANCELED' : 'PENDING',
-          updatedAt: title.updatedAt,
-        });
-        if (data.bankAccountId && title.paidValue > 0) {
-          const account = this.getTenantStorage(schemaNamespace)?.bankAccounts.find((b) => b.id === data.bankAccountId);
-          if (account) {
-            await RepositoryManager.getInstance().getRepositories().financial.updateBankBalance(cleanCnpj, account.id, account.currentBalance);
-          }
+      await RepositoryManager.getInstance().getRepositories().receivables.updateReceivable(cleanCnpj, id, {
+        remainingAmount: title.balanceValue,
+        paidAmount: title.paidValue,
+        status: title.status === 'PAID' ? 'PAID' : title.status === 'PARTIALLY_PAID' ? 'PARTIALLY_PAID' : title.status === 'CANCELED' ? 'CANCELED' : 'PENDING',
+        updatedAt: title.updatedAt,
+      });
+      if (data.bankAccountId && title.paidValue > 0) {
+        const account = this.getTenantStorage(schemaNamespace)?.bankAccounts.find((b) => b.id === data.bankAccountId);
+        if (account) {
+          await RepositoryManager.getInstance().getRepositories().financial.updateBankBalance(cleanCnpj, account.id, account.currentBalance);
         }
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL da liquidação de conta a receber: ${err.message}`, {
-          cleanCnpj,
-          titleId: id,
-        });
       }
     }
     return title;
@@ -5245,17 +5662,10 @@ class DatabaseEngine {
     const title = this.cancelAccountReceivable(schemaNamespace, id);
     if (title && PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().receivables.updateReceivable(cleanCnpj, id, {
-          status: 'CANCELED',
-          updatedAt: title.updatedAt,
-        });
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha no cancelamento PostgreSQL de conta a receber: ${err.message}`, {
-          cleanCnpj,
-          receivableId: id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().receivables.updateReceivable(cleanCnpj, id, {
+        status: 'CANCELED',
+        updatedAt: title.updatedAt,
+      });
     }
     return title;
   }
@@ -5351,17 +5761,6 @@ class DatabaseEngine {
     };
 
     storage.accountsPayable.unshift(title);
-    const cleanCnpj = schemaNamespace.replace('tenant_', '');
-    try {
-      RepositoryManager.getInstance().getRepositories().financial.createPayable(cleanCnpj, title).catch((err) => {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de conta a pagar: ${err.message}`, {
-          cleanCnpj,
-          titleId: title.id,
-        });
-      });
-    } catch {
-      // Ignora se repositório não inicializado
-    }
     return title;
   }
 
@@ -5369,12 +5768,49 @@ class DatabaseEngine {
     schemaNamespace: string,
     data: Partial<AccountPayable>
   ): Promise<AccountPayable> {
-    const title = this.createAccountPayable(schemaNamespace, data);
-    if (PostgresService.isDbConnected()) {
-      const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      await RepositoryManager.getInstance().getRepositories().financial.createPayable(cleanCnpj, title);
+    const storage = this.getTenantStorage(schemaNamespace);
+    if (!storage) {
+      throw new Error(`Schema namespace [${schemaNamespace}] não encontrado.`);
     }
-    return title;
+
+    const pagCounter = (storage.sequentialCounters.payable || 0) + 1;
+    storage.sequentialCounters.payable = pagCounter;
+    const number = `PAG-${String(pagCounter).padStart(6, '0')}`;
+    const id = `pag-${crypto.randomUUID().slice(0, 8)}`;
+    const now = new Date().toISOString();
+    const originalValue = FinancialMath.round(data.originalValue || 0);
+
+    const title: AccountPayable = {
+      id,
+      number,
+      supplierId: data.supplierId || '',
+      supplierName: data.supplierName || '',
+      supplierDocument: data.supplierDocument,
+      chartOfAccountId: data.chartOfAccountId || 'coa-alfa-06',
+      chartOfAccountCode: data.chartOfAccountCode || '2.1.2.01',
+      costCenterId: data.costCenterId,
+      costCenterCode: data.costCenterCode,
+      description: data.description || 'Título de Conta a Pagar',
+      issueDate: data.issueDate || now.split('T')[0],
+      dueDate: data.dueDate || now.split('T')[0],
+      originalValue,
+      discountValue: data.discountValue || 0,
+      fineValue: data.fineValue || 0,
+      interestValue: data.interestValue || 0,
+      paidValue: 0,
+      balanceValue: originalValue,
+      status: 'OPEN',
+      notes: data.notes,
+      createdBy: data.createdBy || 'Sistema',
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    const persisted = await RepositoryManager.getInstance().getRepositories().financial.createPayable(cleanCnpj, title);
+
+    storage.accountsPayable.unshift(persisted);
+    return persisted;
   }
 
   settleAccountPayable(
@@ -5465,19 +5901,12 @@ class DatabaseEngine {
     const title = this.settleAccountPayable(schemaNamespace, id, data);
     if (title && PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().financial.settlePayableTransaction(
-          cleanCnpj,
-          id,
-          data.paidAmount,
-          data.bankAccountId
-        );
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL da liquidação de conta a pagar: ${err.message}`, {
-          cleanCnpj,
-          payableId: id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().financial.settlePayableTransaction(
+        cleanCnpj,
+        id,
+        data.paidAmount,
+        data.bankAccountId
+      );
     }
     return title;
   }
@@ -5498,16 +5927,9 @@ class DatabaseEngine {
     const title = this.cancelAccountPayable(schemaNamespace, id);
     if (title && PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().financial.updatePayable(cleanCnpj, id, {
-          status: 'CANCELED',
-        });
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha no cancelamento PostgreSQL de conta a pagar: ${err.message}`, {
-          cleanCnpj,
-          payableId: id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().financial.updatePayable(cleanCnpj, id, {
+        status: 'CANCELED',
+      });
     }
     return title;
   }
@@ -5556,14 +5978,7 @@ class DatabaseEngine {
     const account = this.createBankAccount(schemaNamespace, data);
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().financial.createBankAccount(cleanCnpj, account);
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de conta bancária: ${err.message}`, {
-          cleanCnpj,
-          accountId: account.id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().financial.createBankAccount(cleanCnpj, account);
     }
     return account;
   }
@@ -5968,17 +6383,6 @@ class DatabaseEngine {
     }
 
     storage.billingDocuments.unshift(doc);
-    const cleanCnpj = schemaNamespace.replace('tenant_', '');
-    try {
-      RepositoryManager.getInstance().getRepositories().billing.createBilling(cleanCnpj, doc).catch((err: any) => {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de faturamento: ${err.message}`, {
-          cleanCnpj,
-          billingId: doc.id,
-        });
-      });
-    } catch {
-      // Ignora se repositório não inicializado
-    }
 
     this.recordTenantAudit(
       schemaNamespace,
@@ -6153,32 +6557,25 @@ class DatabaseEngine {
     const doc = this.issueBillingDocument(schemaNamespace, id, userId, userName);
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        const storage = this.getTenantStorage(schemaNamespace);
-        const rec = storage?.accountsReceivable.find((r) => r.description?.includes(doc.number));
-        if (rec) {
-          const recV2: any = {
-            id: rec.id,
-            instanceId: rec.id,
-            customerId: rec.customerId,
-            customerName: rec.customerName,
-            customerDocument: rec.customerDocument,
-            description: rec.description,
-            originalAmount: rec.originalValue,
-            paidAmount: rec.originalValue - rec.balanceValue,
-            remainingAmount: rec.balanceValue,
-            status: 'OPEN',
-            dueDate: rec.dueDate,
-            createdAt: rec.createdAt,
-            updatedAt: rec.updatedAt,
-          };
-          await RepositoryManager.getInstance().getRepositories().receivables.createReceivable(cleanCnpj, recV2);
-        }
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de faturamento emitido: ${err.message}`, {
-          cleanCnpj,
-          docId: doc.id,
-        });
+      const storage = this.getTenantStorage(schemaNamespace);
+      const rec = storage?.accountsReceivable.find((r) => r.description?.includes(doc.number));
+      if (rec) {
+        const recV2: any = {
+          id: rec.id,
+          instanceId: rec.id,
+          customerId: rec.customerId,
+          customerName: rec.customerName,
+          customerDocument: rec.customerDocument,
+          description: rec.description,
+          originalAmount: rec.originalValue,
+          paidAmount: rec.originalValue - rec.balanceValue,
+          remainingAmount: rec.balanceValue,
+          status: 'OPEN',
+          dueDate: rec.dueDate,
+          createdAt: rec.createdAt,
+          updatedAt: rec.updatedAt,
+        };
+        await RepositoryManager.getInstance().getRepositories().receivables.createReceivable(cleanCnpj, recV2);
       }
     }
     return doc;
@@ -6646,17 +7043,6 @@ class DatabaseEngine {
     };
 
     storage.recurringBillings.unshift(recurring);
-    const cleanCnpj = schemaNamespace.replace('tenant_', '');
-    try {
-      RepositoryManager.getInstance().getRepositories().billing.createRecurring(cleanCnpj, recurring).catch((err) => {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de faturamento recorrente: ${err.message}`, {
-          cleanCnpj,
-          recurringId: recurring.id,
-        });
-      });
-    } catch {
-      // Ignora se repositório não inicializado
-    }
 
     this.recordTenantAudit(
       schemaNamespace,
@@ -6736,14 +7122,7 @@ class DatabaseEngine {
     const recurring = this.updateRecurringBilling(schemaNamespace, id, data, userId, userName);
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().billing.updateRecurring(cleanCnpj, id, recurring);
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de atualização de recorrência: ${err.message}`, {
-          cleanCnpj,
-          recurringId: id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().billing.updateRecurring(cleanCnpj, id, recurring);
     }
     return recurring;
   }
@@ -6787,14 +7166,7 @@ class DatabaseEngine {
     const recurring = this.setRecurringBillingStatus(schemaNamespace, id, status, userId, userName);
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().billing.updateRecurring(cleanCnpj, id, { status });
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de status de recorrência: ${err.message}`, {
-          cleanCnpj,
-          recurringId: id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().billing.updateRecurring(cleanCnpj, id, { status });
     }
     return recurring;
   }
@@ -6936,22 +7308,14 @@ class DatabaseEngine {
     const res = this.generateRecurringBilling(schemaNamespace, recurringId, targetDate, userId, userName, force);
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().billing.createBilling(cleanCnpj, res.billing);
-        await RepositoryManager.getInstance().getRepositories().billing.logGeneration(cleanCnpj, res.log);
-        await RepositoryManager.getInstance().getRepositories().billing.updateRecurring(cleanCnpj, recurringId, {
-          lastGeneratedCompetence: res.log.competenceLabel,
-          lastGeneratedAt: res.log.executedAt,
-          lastGeneratedBillingId: res.billing.id,
-          lastGeneratedBillingNumber: res.billing.number,
-        });
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de geração de recorrência: ${err.message}`, {
-          cleanCnpj,
-          recurringId,
-          billingId: res.billing.id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().billing.createBilling(cleanCnpj, res.billing);
+      await RepositoryManager.getInstance().getRepositories().billing.logGeneration(cleanCnpj, res.log);
+      await RepositoryManager.getInstance().getRepositories().billing.updateRecurring(cleanCnpj, recurringId, {
+        lastGeneratedCompetence: res.log.competenceLabel,
+        lastGeneratedAt: res.log.executedAt,
+        lastGeneratedBillingId: res.billing.id,
+        lastGeneratedBillingNumber: res.billing.number,
+      });
     }
     return res;
   }
@@ -7158,14 +7522,7 @@ class DatabaseEngine {
     const warehouse = this.createWarehouse(schemaNamespace, data, companyId);
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().inventory.createWarehouse(cleanCnpj, warehouse);
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de depósito: ${err.message}`, {
-          cleanCnpj,
-          warehouseId: warehouse.id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().inventory.createWarehouse(cleanCnpj, warehouse);
     }
     return warehouse;
   }
@@ -7207,14 +7564,7 @@ class DatabaseEngine {
     if (!warehouse) return null;
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().inventory.updateWarehouse(cleanCnpj, id, data);
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na atualização PostgreSQL de depósito: ${err.message}`, {
-          cleanCnpj,
-          warehouseId: id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().inventory.updateWarehouse(cleanCnpj, id, data);
     }
     return warehouse;
   }
@@ -7248,14 +7598,7 @@ class DatabaseEngine {
     if (!deleted) return false;
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().inventory.deleteWarehouse(cleanCnpj, id);
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na exclusão PostgreSQL de depósito: ${err.message}`, {
-          cleanCnpj,
-          warehouseId: id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().inventory.deleteWarehouse(cleanCnpj, id);
     }
     return true;
   }
@@ -7489,19 +7832,13 @@ class DatabaseEngine {
     input: Parameters<DatabaseEngine['recordStockMovement']>[1],
     userContext: { id: string; name: string }
   ): Promise<StockMovement> {
-    const movement = this.recordStockMovement(schemaNamespace, input, userContext);
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
     if (PostgresService.isDbConnected()) {
-      const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().inventory.recordStockMovementTransaction(cleanCnpj, movement);
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de movimentação de estoque: ${err.message}`, {
-          cleanCnpj,
-          movementId: movement.id,
-        });
-      }
+      const movement = this.recordStockMovement(schemaNamespace, input, userContext);
+      const persisted = await RepositoryManager.getInstance().getRepositories().inventory.recordStockMovementTransaction(cleanCnpj, movement);
+      return persisted;
     }
-    return movement;
+    return this.recordStockMovement(schemaNamespace, input, userContext);
   }
 
   // 4. Transferência entre Depósitos
@@ -7577,15 +7914,8 @@ class DatabaseEngine {
     const result = this.transferStock(schemaNamespace, input, userContext);
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().inventory.recordStockMovementTransaction(cleanCnpj, result.outboundMovement);
-        await RepositoryManager.getInstance().getRepositories().inventory.recordStockMovementTransaction(cleanCnpj, result.inboundMovement);
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de transferência de estoque: ${err.message}`, {
-          cleanCnpj,
-          productId: input.productId,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().inventory.recordStockMovementTransaction(cleanCnpj, result.outboundMovement);
+      await RepositoryManager.getInstance().getRepositories().inventory.recordStockMovementTransaction(cleanCnpj, result.inboundMovement);
     }
     return result;
   }
@@ -8022,14 +8352,7 @@ class DatabaseEngine {
     const doc = this.createFiscalDocument(schemaNamespace, input, userId, userName);
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().fiscal.createFiscalDocument(cleanCnpj, doc);
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de documento fiscal: ${err.message}`, {
-          cleanCnpj,
-          docId: doc.id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().fiscal.createFiscalDocument(cleanCnpj, doc);
     }
     return doc;
   }
@@ -8093,20 +8416,13 @@ class DatabaseEngine {
     const doc = this.transmitFiscalDocument(schemaNamespace, id, userId, userName);
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().fiscal.updateFiscalDocument(cleanCnpj, id, {
-          status: doc.status,
-          protocolNumber: doc.protocolNumber,
-          authorizedAt: doc.authorizedAt,
-          xmlPayload: doc.xmlPayload,
-          updatedAt: doc.updatedAt,
-        });
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha na transmissão PostgreSQL de documento fiscal: ${err.message}`, {
-          cleanCnpj,
-          docId: id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().fiscal.updateFiscalDocument(cleanCnpj, id, {
+        status: doc.status,
+        protocolNumber: doc.protocolNumber,
+        authorizedAt: doc.authorizedAt,
+        xmlPayload: doc.xmlPayload,
+        updatedAt: doc.updatedAt,
+      });
     }
     return doc;
   }
@@ -10822,17 +11138,6 @@ class DatabaseEngine {
     });
 
     storage.auditLogs.unshift(result.audit);
-    const cleanCnpj = schemaNamespace.replace('tenant_', '');
-    try {
-      RepositoryManager.getInstance().getRepositories().receivables.createReceivable(cleanCnpj, result.receivable).catch((err: any) => {
-        logger.error(`[DatabaseEngine] Falha na persistência PostgreSQL de conta a receber: ${err.message}`, {
-          cleanCnpj,
-          receivableId: result.receivable.id,
-        });
-      });
-    } catch {
-      // Ignora se repositório não inicializado
-    }
     return result.receivable;
   }
 
@@ -10956,20 +11261,12 @@ class DatabaseEngine {
     const res = this.recordReceivablePayment(schemaNamespace, input, user);
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().receivables.recordPaymentTransaction(
-          cleanCnpj,
-          res.payment,
-          res.payment.collectionId || '',
-          res.receivable.id
-        );
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha no registro PostgreSQL de liquidação de recebível: ${err.message}`, {
-          cleanCnpj,
-          receivableId: res.receivable.id,
-          paymentId: res.payment.id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().receivables.recordPaymentTransaction(
+        cleanCnpj,
+        res.payment,
+        res.payment.collectionId || '',
+        res.receivable.id
+      );
     }
     return res;
   }
@@ -11008,23 +11305,15 @@ class DatabaseEngine {
     const result = this.reverseReceivablePayment(schemaNamespace, paymentId, reason, user);
     if (PostgresService.isDbConnected()) {
       const cleanCnpj = schemaNamespace.replace('tenant_', '');
-      try {
-        await RepositoryManager.getInstance().getRepositories().receivables.updateReceivable(
-          cleanCnpj,
-          result.receivable.id,
-          {
-            status: result.receivable.status,
-            paidAmount: result.receivable.paidAmount,
-            remainingAmount: result.receivable.remainingAmount,
-          }
-        );
-      } catch (err: any) {
-        logger.error(`[DatabaseEngine] Falha no estorno PostgreSQL de pagamento de recebível: ${err.message}`, {
-          cleanCnpj,
-          paymentId,
-          receivableId: result.receivable.id,
-        });
-      }
+      await RepositoryManager.getInstance().getRepositories().receivables.updateReceivable(
+        cleanCnpj,
+        result.receivable.id,
+        {
+          status: result.receivable.status,
+          paidAmount: result.receivable.paidAmount,
+          remainingAmount: result.receivable.remainingAmount,
+        }
+      );
     }
     return result;
   }
