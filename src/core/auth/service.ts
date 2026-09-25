@@ -117,7 +117,9 @@ export class AuthService {
     const isMatch = await bcrypt.compare(params.passwordPlain, userWithHash.passwordHash);
     if (!isMatch) {
       const { failedCount, isLocked } = await repos.users.recordLoginFailure(userWithHash.id);
-      dbEngine.recordLoginFailure(userWithHash.id);
+      if (!PostgresService.isDbConnected()) {
+        dbEngine.recordLoginFailure(userWithHash.id);
+      }
 
       AuditService.recordSecurityEvent({
         type: isLocked ? 'SECURITY_ACCOUNT_LOCKED' : 'SECURITY_LOGIN_FAILURE',
@@ -168,10 +170,26 @@ export class AuthService {
 
     // Login bem-sucedido: reseta contador de falhas
     await repos.users.resetLoginFailures(userWithHash.id);
-    dbEngine.resetLoginFailures(userWithHash.id);
+    if (!PostgresService.isDbConnected()) {
+      dbEngine.resetLoginFailures(userWithHash.id);
+    }
 
     const { passwordHash: _, mfaSecret: __, recoveryCodes: ___, ...user } = userWithHash;
-    const companies = dbEngine.listCompaniesForUser(user.id);
+    let companies: Array<{ company: Company; membership: Membership }> = [];
+    try {
+      const userMemberships = await repos.memberships.listByUser(user.id);
+      for (const mem of userMemberships) {
+        const comp = await repos.companies.findById(mem.companyId);
+        if (comp) {
+          companies.push({ company: comp, membership: mem });
+        }
+      }
+    } catch {
+      // Fallback para ambiente in-memory
+    }
+    if (companies.length === 0) {
+      companies = dbEngine.listCompaniesForUser(user.id);
+    }
 
     // 5. Criação de registro de Sessão Ativa (PRD 02 - Seção 12)
     const sessionId = `ses-${crypto.randomUUID()}`;
@@ -416,13 +434,40 @@ export class AuthService {
    * Logout da sessão atual
    */
   static logout(sessionId: string): boolean {
+    if (PostgresService.isDbConnected()) {
+      RepositoryManager.getInstance().getRepositories().sessions.revoke(sessionId, 'User logout').catch(() => {});
+    }
     return dbEngine.revokeSession(sessionId);
+  }
+
+  static async logoutAsync(sessionId: string): Promise<boolean> {
+    const repos = RepositoryManager.getInstance().getRepositories();
+    try {
+      await repos.sessions.revoke(sessionId, 'User logout');
+    } catch (err: any) {
+      logger.warn(`[AuthService] Falha ao revogar sessão no PostgreSQL: ${err.message}`);
+    }
+    dbEngine.revokeSession(sessionId);
+    return true;
   }
 
   /**
    * Logout de todas as sessões do usuário (PRD 02 - Seção 14)
    */
   static logoutAll(userId: string): number {
+    if (PostgresService.isDbConnected()) {
+      RepositoryManager.getInstance().getRepositories().sessions.revokeAllForUser(userId, 'Logout all sessions').catch(() => {});
+    }
+    return dbEngine.revokeAllSessionsForUser(userId);
+  }
+
+  static async logoutAllAsync(userId: string): Promise<number> {
+    const repos = RepositoryManager.getInstance().getRepositories();
+    try {
+      await repos.sessions.revokeAllForUser(userId, 'Logout all sessions');
+    } catch (err: any) {
+      logger.warn(`[AuthService] Falha ao revogar sessões no PostgreSQL: ${err.message}`);
+    }
     return dbEngine.revokeAllSessionsForUser(userId);
   }
 

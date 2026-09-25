@@ -4906,6 +4906,22 @@ class DatabaseEngine {
     return contract;
   }
 
+  async listContractsAsync(schemaNamespace: string, filter?: { status?: string; partnerId?: string }): Promise<Contract[]> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().sales.listContracts(cleanCnpj, filter);
+    }
+    return this.listContracts(schemaNamespace);
+  }
+
+  async getContractByIdAsync(schemaNamespace: string, id: string): Promise<Contract | undefined> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().sales.findContractById(cleanCnpj, id);
+    }
+    return this.getContractById(schemaNamespace, id);
+  }
+
   // --- ORDENS DE SERVIÇO (SERVICE ORDERS / OS) ---
 
   listServiceOrders(schemaNamespace: string): ServiceOrder[] {
@@ -4916,10 +4932,26 @@ class DatabaseEngine {
     );
   }
 
+  async listServiceOrdersAsync(schemaNamespace: string, filter?: { status?: string; partnerId?: string }): Promise<ServiceOrder[]> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().sales.listServiceOrders(cleanCnpj, filter);
+    }
+    return this.listServiceOrders(schemaNamespace);
+  }
+
   getServiceOrderById(schemaNamespace: string, id: string): ServiceOrder | undefined {
     const storage = this.getTenantStorage(schemaNamespace);
     if (!storage) return undefined;
     return storage.serviceOrders.find((os) => os.id === id);
+  }
+
+  async getServiceOrderByIdAsync(schemaNamespace: string, id: string): Promise<ServiceOrder | undefined> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().sales.findServiceOrderById(cleanCnpj, id);
+    }
+    return this.getServiceOrderById(schemaNamespace, id);
   }
 
   createServiceOrder(
@@ -5716,6 +5748,25 @@ class DatabaseEngine {
     return list.find((p) => p.id === id);
   }
 
+  async listAccountsPayableAsync(
+    schemaNamespace: string,
+    filter?: { status?: string; supplierId?: string }
+  ): Promise<AccountPayable[]> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().financial.listPayables(cleanCnpj, filter);
+    }
+    return this.listAccountsPayable(schemaNamespace, filter);
+  }
+
+  async getAccountPayableByIdAsync(schemaNamespace: string, id: string): Promise<AccountPayable | undefined> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().financial.findPayableById(cleanCnpj, id);
+    }
+    return this.getAccountPayableById(schemaNamespace, id);
+  }
+
   createAccountPayable(
     schemaNamespace: string,
     data: Partial<AccountPayable>
@@ -5938,6 +5989,23 @@ class DatabaseEngine {
     const storage = this.getTenantStorage(schemaNamespace);
     if (!storage) return [];
     return [...storage.bankAccounts];
+  }
+
+  async listBankAccountsAsync(schemaNamespace: string): Promise<BankAccount[]> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().financial.listBankAccounts(cleanCnpj);
+    }
+    return this.listBankAccounts(schemaNamespace);
+  }
+
+  async getBankAccountByIdAsync(schemaNamespace: string, id: string): Promise<BankAccount | undefined> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().financial.findBankAccountById(cleanCnpj, id);
+    }
+    const storage = this.getTenantStorage(schemaNamespace);
+    return storage?.bankAccounts.find((b) => b.id === id);
   }
 
   createBankAccount(schemaNamespace: string, data: Partial<BankAccount>): BankAccount {
@@ -7450,8 +7518,35 @@ class DatabaseEngine {
     return this.getBillingDocuments(schemaNamespace, filters);
   }
 
+  async listBillingDocumentsAsync(
+    schemaNamespace: string,
+    filters?: { status?: string; customerId?: string }
+  ): Promise<BillingDocument[]> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().billing.listBilling(cleanCnpj, filters);
+    }
+    return this.listBillingDocuments(schemaNamespace, filters);
+  }
+
+  async getBillingDocumentByIdAsync(schemaNamespace: string, id: string): Promise<BillingDocument | undefined> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().billing.findBillingById(cleanCnpj, id);
+    }
+    return this.getBillingDocumentById(schemaNamespace, id);
+  }
+
   listRecurringBillings(schemaNamespace: string): RecurringBilling[] {
     return this.getRecurringBillings(schemaNamespace);
+  }
+
+  async listRecurringBillingsAsync(schemaNamespace: string): Promise<RecurringBilling[]> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().billing.listRecurring(cleanCnpj);
+    }
+    return this.listRecurringBillings(schemaNamespace);
   }
 
   // ============================================================================
@@ -7465,10 +7560,26 @@ class DatabaseEngine {
     return storage.warehouses || [];
   }
 
+  async listWarehousesAsync(schemaNamespace: string): Promise<Warehouse[]> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().inventory.listWarehouses(cleanCnpj);
+    }
+    return this.listWarehouses(schemaNamespace);
+  }
+
   getWarehouseById(schemaNamespace: string, id: string): Warehouse | undefined {
     const storage = this.getTenantStorage(schemaNamespace);
     if (!storage) return undefined;
     return (storage.warehouses || []).find((w) => w.id === id);
+  }
+
+  async getWarehouseByIdAsync(schemaNamespace: string, id: string): Promise<Warehouse | undefined> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().inventory.findWarehouseById(cleanCnpj, id);
+    }
+    return this.getWarehouseById(schemaNamespace, id);
   }
 
   createWarehouse(
@@ -7634,6 +7745,21 @@ class DatabaseEngine {
     }
 
     return items;
+  }
+
+  async listStockItemsAsync(
+    schemaNamespace: string,
+    filters?: {
+      warehouseId?: string;
+      search?: string;
+      lowStockOnly?: boolean;
+    }
+  ): Promise<StockItem[]> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().inventory.listStockItems(cleanCnpj, filters?.warehouseId);
+    }
+    return this.listStockItems(schemaNamespace, filters);
   }
 
   getStockItem(
@@ -7961,6 +8087,23 @@ class DatabaseEngine {
     return list;
   }
 
+  async listStockMovementsAsync(
+    schemaNamespace: string,
+    filters?: {
+      warehouseId?: string;
+      productId?: string;
+      movementType?: string;
+      search?: string;
+      limit?: number;
+    }
+  ): Promise<StockMovement[]> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().inventory.listStockMovements(cleanCnpj, filters?.productId, filters?.warehouseId);
+    }
+    return this.listStockMovements(schemaNamespace, filters);
+  }
+
   // 6. Métricas Consolidadas de Estoque
   getInventoryMetrics(schemaNamespace: string): InventoryMetrics {
     const storage = this.getTenantStorage(schemaNamespace);
@@ -8105,11 +8248,32 @@ class DatabaseEngine {
     return list;
   }
 
-  // 3. Obter Documento Fiscal por ID
   getFiscalDocumentById(schemaNamespace: string, id: string): FiscalDocument | undefined {
     const storage = this.getTenantStorage(schemaNamespace);
     if (!storage) return undefined;
     return (storage.fiscalDocuments || []).find((d) => d.id === id);
+  }
+
+  async listFiscalDocumentsAsync(
+    schemaNamespace: string,
+    filters?: {
+      status?: string;
+      model?: string;
+    }
+  ): Promise<FiscalDocument[]> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().fiscal.listFiscalDocuments(cleanCnpj, filters);
+    }
+    return this.listFiscalDocuments(schemaNamespace, filters as any);
+  }
+
+  async getFiscalDocumentByIdAsync(schemaNamespace: string, id: string): Promise<FiscalDocument | undefined> {
+    const cleanCnpj = schemaNamespace.replace('tenant_', '');
+    if (PostgresService.isDbConnected()) {
+      return RepositoryManager.getInstance().getRepositories().fiscal.findFiscalDocumentById(cleanCnpj, id);
+    }
+    return this.getFiscalDocumentById(schemaNamespace, id);
   }
 
   // 4. Criar Documento Fiscal Eletrônico

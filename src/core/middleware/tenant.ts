@@ -5,6 +5,8 @@
 
 import { Request, Response, NextFunction } from 'express';
 import { dbEngine } from '../database/engine.js';
+import { RepositoryManager } from '../database/repositories/index.js';
+import { PostgresService } from '../database/postgres.js';
 import { ForbiddenError, NotFoundError } from '../errors/index.js';
 import { Company, Membership, TenantContext } from '../../shared/types.js';
 import { AuditService } from '../audit/service.js';
@@ -17,7 +19,7 @@ declare global {
   }
 }
 
-export function tenantMiddleware(req: Request, _res: Response, next: NextFunction) {
+export async function tenantMiddleware(req: Request, _res: Response, next: NextFunction) {
   if (!req.user) {
     return next(new ForbiddenError('Contexto de usuário não inicializado'));
   }
@@ -29,14 +31,34 @@ export function tenantMiddleware(req: Request, _res: Response, next: NextFunctio
     return next(new ForbiddenError('Header x-enlace-company-id obrigatório para operações com contexto de empresa.'));
   }
 
-  // 1. Busca empresa no Control Plane
-  const company = dbEngine.getCompanyById(targetCompanyId);
+  // 1. Busca empresa no Control Plane (PostgreSQL-First)
+  let company: Company | undefined;
+  let membership: Membership | undefined;
+
+  try {
+    const repos = RepositoryManager.getInstance().getRepositories();
+    company = await repos.companies.findById(targetCompanyId);
+    if (!company && (targetCompanyId.includes('.') || targetCompanyId.length === 14)) {
+      company = await repos.companies.findByCnpj(targetCompanyId);
+    }
+    if (company) {
+      membership = await repos.memberships.findByUserAndCompany(req.user.id, company.id);
+    }
+  } catch {
+    // Fallback se repositórios não estiverem inicializados
+  }
+
+  if (!company) {
+    company = dbEngine.getCompanyById(targetCompanyId);
+  }
   if (!company) {
     return next(new NotFoundError('Empresa / Instância'));
   }
 
   // 2. Validação autoritativa no servidor: O usuário logado possui membresia nesta empresa?
-  const membership = dbEngine.getMembership(req.user.id, company.id);
+  if (!membership) {
+    membership = dbEngine.getMembership(req.user.id, company.id);
+  }
 
   if (!membership || !membership.isActive) {
     // Registra tentativa de violação de fronteira (IDOR / Cross-Instance) na auditoria e eventos de segurança

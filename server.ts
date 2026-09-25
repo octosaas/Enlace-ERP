@@ -13,6 +13,8 @@ import jwt from 'jsonwebtoken';
 
 import { createServer as createViteServer } from 'vite';
 import { dbEngine } from './src/core/database/engine.js';
+import { RepositoryManager } from './src/core/database/repositories/index.js';
+import { PostgresService } from './src/core/database/postgres.js';
 import { AuthService, AuthSessionPayload } from './src/core/auth/service.js';
 import { authMiddleware } from './src/core/middleware/auth.js';
 import { tenantMiddleware } from './src/core/middleware/tenant.js';
@@ -227,10 +229,26 @@ app.post('/api/v1/auth/refresh', async (req: Request, res: Response, next: NextF
   }
 });
 
-// 3. Obter dados do usuário autenticado e empresas autorizadas
-app.get('/api/v1/auth/me', authMiddleware, (req: Request, res: Response) => {
+// 3. Obter dados do usuário autenticado e empresas autorizadas (PostgreSQL-First)
+app.get('/api/v1/auth/me', authMiddleware, async (req: Request, res: Response) => {
   const user = req.user!;
-  const companies = dbEngine.listCompaniesForUser(user.id);
+  const repos = RepositoryManager.getInstance().getRepositories();
+  let companies: Array<{ company: any; membership: any }> = [];
+
+  try {
+    const mems = await repos.memberships.listByUser(user.id);
+    for (const m of mems) {
+      const c = await repos.companies.findById(m.companyId);
+      if (c) companies.push({ company: c, membership: m });
+    }
+  } catch {
+    // Fallback se repositórios não inicializados
+  }
+
+  if (companies.length === 0) {
+    companies = dbEngine.listCompaniesForUser(user.id);
+  }
+
   res.json({
     success: true,
     data: { user, companies, currentSessionId: req.sessionId },
@@ -238,7 +256,7 @@ app.get('/api/v1/auth/me', authMiddleware, (req: Request, res: Response) => {
   });
 });
 
-// 4. Logout da Sessão Atual (PRD 02 - Seção 14) - Idempotente e Resiliente
+// 4. Logout da Sessão Atual (PRD 02 - Seção 14) - Idempotente e Resiliente (PostgreSQL-First)
 app.post('/api/v1/auth/logout', async (req: Request, res: Response) => {
   let sessionId: string | undefined = req.sessionId;
   let userId: string | undefined = req.user?.id;
@@ -248,7 +266,7 @@ app.post('/api/v1/auth/logout', async (req: Request, res: Response) => {
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.substring(7).trim();
     try {
-      const payload = AuthService.verifyToken(token);
+      const payload = await AuthService.verifyTokenAsync(token);
       sessionId = payload.sessionId;
       userId = payload.userId;
       userEmail = payload.email;
@@ -268,7 +286,7 @@ app.post('/api/v1/auth/logout', async (req: Request, res: Response) => {
   }
 
   if (sessionId) {
-    AuthService.logout(sessionId);
+    await AuthService.logoutAsync(sessionId);
   }
 
   await AuditService.recordAsync({
@@ -290,9 +308,9 @@ app.post('/api/v1/auth/logout', async (req: Request, res: Response) => {
   });
 });
 
-// 5. Logout Global de Todas as Sessões do Usuário (PRD 02 - Seção 14)
+// 5. Logout Global de Todas as Sessões do Usuário (PRD 02 - Seção 14) (PostgreSQL-First)
 app.post('/api/v1/auth/logout-all', authMiddleware, async (req: Request, res: Response) => {
-  const count = AuthService.logoutAll(req.user!.id);
+  const count = await AuthService.logoutAllAsync(req.user!.id);
 
   await AuditService.recordAsync({
     userId: req.user?.id,
@@ -313,9 +331,24 @@ app.post('/api/v1/auth/logout-all', authMiddleware, async (req: Request, res: Re
   });
 });
 
-// 6. Listar Sessões Ativas do Usuário (PRD 02 - Seção 12)
-app.get('/api/v1/auth/sessions', authMiddleware, (req: Request, res: Response) => {
-  const sessions = dbEngine.listSessionsForUser(req.user!.id, req.sessionId);
+// 6. Listar Sessões Ativas do Usuário (PRD 02 - Seção 12) (PostgreSQL-First)
+app.get('/api/v1/auth/sessions', authMiddleware, async (req: Request, res: Response) => {
+  const repos = RepositoryManager.getInstance().getRepositories();
+  let sessions: any[] = [];
+  try {
+    const rawSessions = await repos.sessions.listForUser(req.user!.id);
+    sessions = rawSessions.map((s) => ({
+      ...s,
+      isCurrent: s.id === req.sessionId,
+    }));
+  } catch {
+    // Fallback se repositórios não estiverem disponíveis
+  }
+
+  if (sessions.length === 0) {
+    sessions = dbEngine.listSessionsForUser(req.user!.id, req.sessionId);
+  }
+
   res.json({
     success: true,
     data: sessions,
@@ -323,13 +356,18 @@ app.get('/api/v1/auth/sessions', authMiddleware, (req: Request, res: Response) =
   });
 });
 
-// 7. Revogar uma Sessão Remota Específica (PRD 02 - Seção 14)
+// 7. Revogar uma Sessão Remota Específica (PRD 02 - Seção 14) (PostgreSQL-First)
 app.delete('/api/v1/auth/sessions/:sessionId', authMiddleware, async (req: Request, res: Response) => {
-  const targetSession = dbEngine.getSession(req.params.sessionId);
+  const repos = RepositoryManager.getInstance().getRepositories();
+  const targetSession =
+    (await repos.sessions.findById(req.params.sessionId)) ||
+    dbEngine.getSession(req.params.sessionId);
+
   if (!targetSession || targetSession.userId !== req.user!.id) {
     throw new NotFoundError('Sessão');
   }
 
+  await repos.sessions.revoke(req.params.sessionId, 'Revogada pelo usuário');
   dbEngine.revokeSession(req.params.sessionId);
 
   await AuditService.recordAsync({
@@ -534,9 +572,30 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.USERS_VIEW),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { activeCompany } = req.tenantContext!;
-    const members = dbEngine.listMembersForCompany(activeCompany!.id);
+    const repos = RepositoryManager.getInstance().getRepositories();
+    let members: any[] = [];
+    try {
+      const mems = await repos.memberships.listByCompany(activeCompany!.id);
+      if (mems.length > 0) {
+        members = await Promise.all(
+          mems.map(async (m) => {
+            const u = await repos.users.findById(m.userId);
+            return {
+              membership: m,
+              user: u ? { id: u.id, email: u.email, name: u.name, status: u.status } : undefined,
+            };
+          })
+        );
+      }
+    } catch {
+      // Fallback
+    }
+
+    if (members.length === 0) {
+      members = dbEngine.listMembersForCompany(activeCompany!.id);
+    }
 
     res.json({
       success: true,
@@ -696,7 +755,9 @@ app.put(
     const { newRole } = req.body;
     const { membership: operatorMembership, user, activeCompany, schemaNamespace } = req.tenantContext!;
 
-    const targetMembership = dbEngine.getMembershipById(membershipId);
+    const repos = RepositoryManager.getInstance().getRepositories();
+    const targetMembership =
+      (await repos.memberships.findById(membershipId)) || dbEngine.getMembershipById(membershipId);
     if (!targetMembership || targetMembership.companyId !== activeCompany!.id) {
       throw new NotFoundError('Membro');
     }
@@ -728,7 +789,15 @@ app.put(
       );
     }
 
-    const updated = dbEngine.updateMembershipRole(membershipId, newRole as UserRole);
+    let updated = dbEngine.updateMembershipRole(membershipId, newRole as UserRole);
+    if (PostgresService.isDbConnected()) {
+      try {
+        const pgUpdated = await repos.memberships.updateRole(membershipId, newRole as UserRole);
+        if (pgUpdated) updated = pgUpdated;
+      } catch (err: any) {
+        logger.warn(`[Membership] Falha ao atualizar role no PostgreSQL: ${err.message}`);
+      }
+    }
 
     await AuditService.recordAsync({
       userId: user!.id,
@@ -763,7 +832,9 @@ app.delete(
     const { membershipId } = req.params;
     const { membership: operatorMembership, user, activeCompany, schemaNamespace } = req.tenantContext!;
 
-    const targetMembership = dbEngine.getMembershipById(membershipId);
+    const repos = RepositoryManager.getInstance().getRepositories();
+    const targetMembership =
+      (await repos.memberships.findById(membershipId)) || dbEngine.getMembershipById(membershipId);
     if (!targetMembership || targetMembership.companyId !== activeCompany!.id) {
       throw new NotFoundError('Membro');
     }
@@ -774,6 +845,13 @@ app.delete(
     }
 
     const revoked = dbEngine.revokeMembership(membershipId);
+    if (PostgresService.isDbConnected()) {
+      try {
+        await repos.memberships.delete(membershipId);
+      } catch (err: any) {
+        logger.warn(`[Membership] Falha ao excluir membresia no PostgreSQL: ${err.message}`);
+      }
+    }
 
     await AuditService.recordAsync({
       userId: user!.id,
