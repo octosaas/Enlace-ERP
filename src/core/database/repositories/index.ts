@@ -166,7 +166,7 @@ export class RepositoryManager {
       ),
     };
 
-    return this.repos;
+    return this.repos!;
   }
 
   getRepositories(): AppRepositories {

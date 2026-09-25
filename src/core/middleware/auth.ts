@@ -6,9 +6,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { AuthService } from '../auth/service.js';
 import { UnauthorizedError } from '../errors/index.js';
-import { dbEngine } from '../database/engine.js';
 import { User } from '../../shared/types.js';
-
 import { RepositoryManager } from '../database/repositories/index.js';
 
 declare global {
@@ -32,7 +30,7 @@ export async function authMiddleware(req: Request, _res: Response, next: NextFun
   try {
     const payload = await AuthService.verifyTokenAsync(token);
     const repos = RepositoryManager.getInstance().getRepositories();
-    const storedUser = (await repos.users.findById(payload.userId)) || dbEngine.getUserById(payload.userId);
+    const storedUser = await repos.users.findById(payload.userId);
     if (!storedUser || storedUser.status !== 'ACTIVE') {
       return next(new UnauthorizedError('Usuário associado ao token não existe ou foi revogado.'));
     }

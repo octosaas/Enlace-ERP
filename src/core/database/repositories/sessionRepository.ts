@@ -14,7 +14,7 @@ export interface ISessionRepository {
   listForUser(userId: string): Promise<UserSession[]>;
   saveRefreshToken(token: RefreshToken): Promise<void>;
   getRefreshToken(tokenHash: string): Promise<RefreshToken | undefined>;
-  consumeRefreshToken(tokenHash: string, replacedBy?: string): Promise<void>;
+  consumeRefreshToken(tokenHash: string, replacedBy?: string): Promise<boolean>;
 }
 
 export class PostgresSessionRepository implements ISessionRepository {
@@ -120,12 +120,13 @@ export class PostgresSessionRepository implements ISessionRepository {
     });
   }
 
-  async consumeRefreshToken(tokenHash: string, replacedBy?: string): Promise<void> {
-    await PostgresService.withControlPlaneClient(async (client) => {
-      await client.query(
-        'UPDATE cp_refresh_tokens SET is_consumed = true, replaced_by_token_hash = $1 WHERE token_hash = $2',
+  async consumeRefreshToken(tokenHash: string, replacedBy?: string): Promise<boolean> {
+    return PostgresService.withControlPlaneClient(async (client) => {
+      const res = await client.query(
+        'UPDATE cp_refresh_tokens SET is_consumed = true, replaced_by_token_hash = $1 WHERE token_hash = $2 AND is_consumed = false RETURNING *',
         [replacedBy || null, tokenHash]
       );
+      return (res.rowCount ?? 0) > 0;
     });
   }
 
@@ -188,11 +189,13 @@ export class InMemorySessionRepository implements ISessionRepository {
     return this.refreshTokens.get(tokenHash);
   }
 
-  async consumeRefreshToken(tokenHash: string, replacedBy?: string): Promise<void> {
+  async consumeRefreshToken(tokenHash: string, replacedBy?: string): Promise<boolean> {
     const t = this.refreshTokens.get(tokenHash);
-    if (t) {
+    if (t && !t.isUsed) {
       t.isUsed = true;
       if (replacedBy) t.replacedByTokenHash = replacedBy;
+      return true;
     }
+    return false;
   }
 }

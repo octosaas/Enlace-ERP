@@ -134,7 +134,9 @@ const loginRateLimiter = createRateLimitMiddleware({
 // 1. Login com verificação de bloqueio, status, MFA e registro de sessão
 app.post('/api/v1/auth/login', loginRateLimiter, async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { email, password, mfaCode } = req.body;
+    const email = req.body.email;
+    const password = req.body.password || req.body.passwordPlain;
+    const mfaCode = req.body.mfaCode;
     if (!email || !password) {
       return res.status(400).json({
         success: false,

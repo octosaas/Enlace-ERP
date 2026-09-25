@@ -54,9 +54,13 @@ async function runProductionReadinessTests() {
     const origJwt = process.env.JWT_SECRET;
     const origVault = process.env.ENLACE_VAULT_KEY;
     const origDb = process.env.DATABASE_URL;
+    const origAppletId = process.env.APPLET_ID;
+    const origKService = process.env.K_SERVICE;
 
     let fatalJwtBlocked = false;
     try {
+      delete process.env.APPLET_ID;
+      delete process.env.K_SERVICE;
       process.env.NODE_ENV = 'production';
       delete process.env.JWT_SECRET;
       process.env.ENLACE_VAULT_KEY = 'valid_production_vault_key_minimum_32_characters_long_2026';
@@ -71,6 +75,8 @@ async function runProductionReadinessTests() {
       if (origJwt) process.env.JWT_SECRET = origJwt;
       if (origVault) process.env.ENLACE_VAULT_KEY = origVault;
       if (origDb) process.env.DATABASE_URL = origDb;
+      if (origAppletId) process.env.APPLET_ID = origAppletId;
+      if (origKService) process.env.K_SERVICE = origKService;
     }
 
     assert(fatalJwtBlocked, '1. Secrets: Processo não sobe em produção se JWT_SECRET estiver ausente (Fail-Closed)');
@@ -82,8 +88,12 @@ async function runProductionReadinessTests() {
   {
     const origEnv = process.env.NODE_ENV;
     const origJwt = process.env.JWT_SECRET;
+    const origAppletId = process.env.APPLET_ID;
+    const origKService = process.env.K_SERVICE;
     let weakJwtBlocked = false;
     try {
+      delete process.env.APPLET_ID;
+      delete process.env.K_SERVICE;
       process.env.NODE_ENV = 'production';
       process.env.JWT_SECRET = DEV_DEFAULT_JWT_SECRET;
       process.env.ENLACE_VAULT_KEY = 'valid_production_vault_key_minimum_32_characters_long_2026';
@@ -96,6 +106,8 @@ async function runProductionReadinessTests() {
     } finally {
       process.env.NODE_ENV = origEnv;
       if (origJwt) process.env.JWT_SECRET = origJwt;
+      if (origAppletId) process.env.APPLET_ID = origAppletId;
+      if (origKService) process.env.K_SERVICE = origKService;
     }
 
     assert(weakJwtBlocked, '2. Secrets: Processo rejeita JWT_SECRET de desenvolvimento em produção');
@@ -107,8 +119,12 @@ async function runProductionReadinessTests() {
   {
     const origEnv = process.env.NODE_ENV;
     const origVault = process.env.ENLACE_VAULT_KEY;
+    const origAppletId = process.env.APPLET_ID;
+    const origKService = process.env.K_SERVICE;
     let vaultKeyBlocked = false;
     try {
+      delete process.env.APPLET_ID;
+      delete process.env.K_SERVICE;
       process.env.NODE_ENV = 'production';
       process.env.JWT_SECRET = 'valid_production_jwt_signing_key_32_chars_long_2026';
       delete process.env.ENLACE_VAULT_KEY;
@@ -121,6 +137,8 @@ async function runProductionReadinessTests() {
     } finally {
       process.env.NODE_ENV = origEnv;
       if (origVault) process.env.ENLACE_VAULT_KEY = origVault;
+      if (origAppletId) process.env.APPLET_ID = origAppletId;
+      if (origKService) process.env.K_SERVICE = origKService;
     }
 
     assert(vaultKeyBlocked, '3. Secrets: Processo não sobe em produção se ENLACE_VAULT_KEY estiver ausente');
@@ -132,8 +150,12 @@ async function runProductionReadinessTests() {
   {
     const origEnv = process.env.NODE_ENV;
     const origDb = process.env.DATABASE_URL;
+    const origAppletId = process.env.APPLET_ID;
+    const origKService = process.env.K_SERVICE;
     let dbUrlBlocked = false;
     try {
+      delete process.env.APPLET_ID;
+      delete process.env.K_SERVICE;
       process.env.NODE_ENV = 'production';
       process.env.JWT_SECRET = 'valid_production_jwt_signing_key_32_chars_long_2026';
       process.env.ENLACE_VAULT_KEY = 'valid_production_vault_key_minimum_32_characters_long_2026';
@@ -146,6 +168,8 @@ async function runProductionReadinessTests() {
     } finally {
       process.env.NODE_ENV = origEnv;
       if (origDb) process.env.DATABASE_URL = origDb;
+      if (origAppletId) process.env.APPLET_ID = origAppletId;
+      if (origKService) process.env.K_SERVICE = origKService;
     }
 
     assert(dbUrlBlocked, '4. PostgreSQL Obrigatório: Falha fatal em produção sem DATABASE_URL configurada');

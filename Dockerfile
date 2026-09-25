@@ -22,8 +22,6 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PORT=3000
-ENV JWT_SECRET=enlace_production_jwt_signing_key_32bytes_cloudrun_deploy_2026
-ENV ENLACE_VAULT_KEY=enlace_production_vault_key_32bytes_cloudrun_deploy_2026
 
 # Copia dependências de produção apenas
 COPY package*.json ./
