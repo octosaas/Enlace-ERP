@@ -71,9 +71,10 @@ export class AuthService {
     requestId?: string;
   }): Promise<LoginResult> {
     await dbEngine.initialize();
+    const repos = RepositoryManager.getInstance().getRepositories();
 
     const cleanEmail = params.email.trim().toLowerCase();
-    const userWithHash = dbEngine.getUserByEmail(cleanEmail);
+    const userWithHash = await repos.users.findByEmail(cleanEmail);
 
     if (!userWithHash) {
       throw new UnauthorizedError('Credenciais inválidas.');
@@ -115,7 +116,8 @@ export class AuthService {
     // 3. Validação do Hash de Senha com bcrypt
     const isMatch = await bcrypt.compare(params.passwordPlain, userWithHash.passwordHash);
     if (!isMatch) {
-      const { failedCount, isLocked } = dbEngine.recordLoginFailure(userWithHash.id);
+      const { failedCount, isLocked } = await repos.users.recordLoginFailure(userWithHash.id);
+      dbEngine.recordLoginFailure(userWithHash.id);
 
       AuditService.recordSecurityEvent({
         type: isLocked ? 'SECURITY_ACCOUNT_LOCKED' : 'SECURITY_LOGIN_FAILURE',
@@ -165,6 +167,7 @@ export class AuthService {
     }
 
     // Login bem-sucedido: reseta contador de falhas
+    await repos.users.resetLoginFailures(userWithHash.id);
     dbEngine.resetLoginFailures(userWithHash.id);
 
     const { passwordHash: _, mfaSecret: __, recoveryCodes: ___, ...user } = userWithHash;
@@ -205,7 +208,8 @@ export class AuthService {
       lastActivityAt: new Date().toISOString(),
     };
 
-    await dbEngine.createSessionAsync(session);
+    const persistedSession = await repos.sessions.create(session);
+    await dbEngine.createSessionAsync(persistedSession);
 
     // Salva o Refresh Token associado (PRD 02 - Seção 13)
     const storedRt: RefreshToken = {
@@ -218,6 +222,7 @@ export class AuthService {
       createdAt: new Date().toISOString(),
       expiresAt: refreshExpiresAt,
     };
+    await repos.sessions.saveRefreshToken(storedRt);
     await dbEngine.saveRefreshTokenAsync(storedRt);
 
     return {
@@ -231,7 +236,44 @@ export class AuthService {
   }
 
   /**
-   * Verificação de token de sessão com validação no banco de sessões ativas
+   * Verificação de token de sessão com validação assíncrona no PostgreSQL (Fonte da Verdade)
+   */
+  static async verifyTokenAsync(token: string): Promise<AuthSessionPayload> {
+    try {
+      const decoded = jwt.verify(token, getJwtSecret()) as AuthSessionPayload;
+      const repos = RepositoryManager.getInstance().getRepositories();
+
+      // Valida se o usuário não foi desativado ou suspenso em tempo real no banco
+      const user = await repos.users.findById(decoded.userId);
+      if (!user || user.status !== 'ACTIVE') {
+        throw new UnauthorizedError('Acesso bloqueado: o status da conta não permite novas operações.');
+      }
+
+      // Valida se a sessão ainda está ativa e não foi revogada no PostgreSQL (PRD 02 - Seção 12)
+      if (decoded.sessionId) {
+        const session = await repos.sessions.findById(decoded.sessionId);
+        if (!session) {
+          throw new UnauthorizedError('Sessão inexistente ou expirada no banco de dados.');
+        }
+
+        if (session.isRevoked) {
+          throw new UnauthorizedError('Sessão revogada pelo usuário ou pela administração.');
+        }
+
+        if (new Date(session.expiresAt).getTime() < Date.now()) {
+          throw new UnauthorizedError('Sessão expirada. Faça login novamente.');
+        }
+      }
+
+      return decoded;
+    } catch (err) {
+      if (err instanceof UnauthorizedError || err instanceof ForbiddenError) throw err;
+      throw new UnauthorizedError('Token de sessão expirado ou inválido.');
+    }
+  }
+
+  /**
+   * Verificação síncrona de token de sessão (sem recriação arbitrária de sessão)
    */
   static verifyToken(token: string): AuthSessionPayload {
     try {
@@ -249,33 +291,23 @@ export class AuthService {
           throw new UnauthorizedError('Sessão revogada pelo usuário ou pela administração.');
         }
 
-        let session = dbEngine.getSession(decoded.sessionId);
+        const session = dbEngine.getSession(decoded.sessionId);
         if (!session) {
-          // Se o processo do servidor foi reiniciado, re-hidrata a sessão ativa
-          // a partir do token criptograficamente válido e não expirado
-          session = dbEngine.createSession({
-            id: decoded.sessionId,
-            userId: user.id,
-            activeCompanyId: decoded.activeCompanyId,
-            tokenHash: crypto.createHash('sha256').update(token).digest('hex'),
-            ipAddress: '127.0.0.1',
-            userAgent: 'Sessão Restaurada',
-            deviceLabel: 'Navegador Web',
-            isRevoked: false,
-            createdAt: new Date().toISOString(),
-            expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
-            lastActivityAt: new Date().toISOString(),
-          });
+          throw new UnauthorizedError('Sessão inexistente ou expirada.');
         }
 
         if (session.isRevoked) {
           throw new UnauthorizedError('Sessão revogada pelo usuário ou pela administração.');
         }
+
+        if (new Date(session.expiresAt).getTime() < Date.now()) {
+          throw new UnauthorizedError('Sessão expirada. Faça login novamente.');
+        }
       }
 
       return decoded;
     } catch (err) {
-      if (err instanceof UnauthorizedError) throw err;
+      if (err instanceof UnauthorizedError || err instanceof ForbiddenError) throw err;
       throw new UnauthorizedError('Token de sessão expirado ou inválido.');
     }
   }
@@ -290,7 +322,13 @@ export class AuthService {
     requestId?: string;
   }): Promise<{ token: string; refreshToken: string }> {
     const tokenHash = crypto.createHash('sha256').update(params.refreshTokenPlain).digest('hex');
-    const storedRt = dbEngine.getRefreshToken(tokenHash);
+    const repos = RepositoryManager.getInstance().getRepositories();
+
+    // Consulta no PostgreSQL primeiro, com fallback para memória se operando em modo de teste
+    let storedRt = await repos.sessions.getRefreshToken(tokenHash);
+    if (!storedRt) {
+      storedRt = dbEngine.getRefreshToken(tokenHash);
+    }
 
     if (!storedRt || storedRt.isRevoked) {
       throw new UnauthorizedError('Refresh token inválido ou revogado.');
@@ -298,7 +336,8 @@ export class AuthService {
 
     // Detecção de Reúso de Refresh Token (Alerta de Ataque / Token Hijacking)
     if (storedRt.isUsed) {
-      // Invalida toda a árvore de sessões do usuário imediatamente por segurança!
+      // Invalida toda a árvore de sessões do usuário imediatamente no banco!
+      await repos.sessions.revokeAllForUser(storedRt.userId, 'Token reuse detected');
       await dbEngine.revokeAllSessionsForUserAsync(storedRt.userId);
 
       AuditService.recordSecurityEvent({
@@ -323,12 +362,12 @@ export class AuthService {
       throw new UnauthorizedError('Refresh token expirado. Faça login novamente.');
     }
 
-    const session = dbEngine.getSession(storedRt.sessionId);
+    const session = (await repos.sessions.findById(storedRt.sessionId)) || dbEngine.getSession(storedRt.sessionId);
     if (!session || session.isRevoked) {
       throw new UnauthorizedError('Sessão associada foi revogada.');
     }
 
-    const user = dbEngine.getUserById(storedRt.userId);
+    const user = (await repos.users.findById(storedRt.userId)) || dbEngine.getUserById(storedRt.userId);
     if (!user || user.status !== 'ACTIVE') {
       throw new UnauthorizedError('Conta inativa.');
     }
@@ -349,10 +388,11 @@ export class AuthService {
     const newRefreshTokenPlain = `rt-${crypto.randomBytes(32).toString('hex')}`;
     const newRefreshTokenHash = crypto.createHash('sha256').update(newRefreshTokenPlain).digest('hex');
 
-    // Marca o token anterior como consumido
+    // Marca o token anterior como consumido no PostgreSQL e na camada de compatibilidade
+    await repos.sessions.consumeRefreshToken(tokenHash, newRefreshTokenHash);
     await dbEngine.markRefreshTokenUsedAsync(tokenHash, newRefreshTokenHash);
 
-    // Salva o novo refresh token
+    // Salva o novo refresh token no PostgreSQL
     const newRtRecord: RefreshToken = {
       id: `rtk-${crypto.randomUUID()}`,
       sessionId: session.id,
@@ -363,6 +403,7 @@ export class AuthService {
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + REFRESH_TOKEN_DAYS * 24 * 60 * 60 * 1000).toISOString(),
     };
+    await repos.sessions.saveRefreshToken(newRtRecord);
     await dbEngine.saveRefreshTokenAsync(newRtRecord);
 
     return {

@@ -9,6 +9,8 @@ import { UnauthorizedError } from '../errors/index.js';
 import { dbEngine } from '../database/engine.js';
 import { User } from '../../shared/types.js';
 
+import { RepositoryManager } from '../database/repositories/index.js';
+
 declare global {
   namespace Express {
     interface Request {
@@ -20,7 +22,7 @@ declare global {
   }
 }
 
-export function authMiddleware(req: Request, _res: Response, next: NextFunction) {
+export async function authMiddleware(req: Request, _res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return next(new UnauthorizedError('Cabeçalho de autorização ausente ou malformatado.'));
@@ -28,13 +30,15 @@ export function authMiddleware(req: Request, _res: Response, next: NextFunction)
 
   const token = authHeader.substring(7).trim();
   try {
-    const payload = AuthService.verifyToken(token);
-    const user = dbEngine.getUserPublic(payload.userId);
-    if (!user) {
+    const payload = await AuthService.verifyTokenAsync(token);
+    const repos = RepositoryManager.getInstance().getRepositories();
+    const storedUser = (await repos.users.findById(payload.userId)) || dbEngine.getUserById(payload.userId);
+    if (!storedUser || storedUser.status !== 'ACTIVE') {
       return next(new UnauthorizedError('Usuário associado ao token não existe ou foi revogado.'));
     }
 
-    req.user = user;
+    const { passwordHash: _, mfaSecret: __, recoveryCodes: ___, ...publicUser } = storedUser;
+    req.user = publicUser as User;
     req.sessionId = payload.sessionId;
     next();
   } catch (err) {

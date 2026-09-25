@@ -78,7 +78,8 @@ export class RepositoryManager {
     securityEvents: any[];
     getTenantStorage: (cleanCnpj: string) => any;
   }): AppRepositories {
-    const isProduction = process.env.NODE_ENV === 'production';
+    const isAiStudioSandbox = !!(process.env.APPLET_ID || process.env.K_SERVICE?.startsWith('ais-'));
+    const isProduction = process.env.NODE_ENV === 'production' && !isAiStudioSandbox;
     const isPgActive = PostgresService.isDbConnected();
 
     if (isPgActive) {
@@ -102,9 +103,9 @@ export class RepositoryManager {
       return this.repos;
     }
 
-    if (isProduction && process.env.STRICT_PRODUCTION_DB === 'true') {
+    if (isProduction) {
       const errorMsg =
-        '[FATAL] Tentativa de inicializar repositórios em memória em ambiente de produção com STRICT_PRODUCTION_DB=true. Persistência PostgreSQL é obrigatória e inegociável. Fail-closed acionado.';
+        '[FATAL] Tentativa de inicializar repositórios em memória em ambiente de produção (NODE_ENV=production). Persistência PostgreSQL é obrigatória e inegociável. Fail-closed acionado.';
       logger.error(errorMsg);
       throw new Error(errorMsg);
     }

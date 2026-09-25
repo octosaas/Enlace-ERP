@@ -261,7 +261,7 @@ class DatabaseEngine {
     logger.info('[DatabaseEngine] Inicializando motor de banco de dados e schemas isolados (PRD 01 & 02)...');
 
     const isProduction = process.env.NODE_ENV === 'production';
-    const seedDemo = !isProduction || !process.env.DATABASE_URL || process.env.SEED_DEMO_DATA === 'true';
+    const seedDemo = !isProduction && process.env.SEED_DEMO_DATA !== 'false';
 
     if (seedDemo) {
       // Seed inicial seguro para demonstração e validação do PRD 01 e 02
@@ -2681,22 +2681,26 @@ class DatabaseEngine {
       }
 
       // Inicializa o RepositoryManager oficial
-      RepositoryManager.getInstance().initialize({
-        users: this.users,
-        companies: this.companies,
-        memberships: this.memberships,
-        sessions: this.sessions,
-        refreshTokens: this.refreshTokens,
-        securityEvents: this.securityEvents,
-        getTenantStorage: (cnpj) => this.getTenantStorage(cnpj),
-      });
+      this.reinitializeRepositories();
     } catch (err: any) {
-      if (process.env.NODE_ENV === 'production' && process.env.STRICT_PRODUCTION_DB === 'true') {
+      if (process.env.NODE_ENV === 'production') {
         logger.error(`[DatabaseEngine] [FATAL] Falha de inicialização PostgreSQL em produção: ${err.message}`);
         throw err;
       }
       logger.warn(`[DatabaseEngine] Aviso na sincronização PostgreSQL: ${err.message}`);
     }
+  }
+
+  reinitializeRepositories() {
+    RepositoryManager.getInstance().initialize({
+      users: this.users,
+      companies: this.companies,
+      memberships: this.memberships,
+      sessions: this.sessions,
+      refreshTokens: this.refreshTokens,
+      securityEvents: this.securityEvents,
+      getTenantStorage: (cnpj) => this.getTenantStorage(cnpj),
+    });
   }
 
   /**
@@ -2769,24 +2773,27 @@ class DatabaseEngine {
 
   createSession(session: UserSession): UserSession {
     this.sessions.set(session.id, session);
-    if (PostgresService.isDbConnected()) {
-      RepositoryManager.getInstance()
-        .getRepositories()
-        .sessions.create(session)
-        .catch((err) => logger.error('[DatabaseEngine] Falha ao persistir sessão no PostgreSQL:', err));
-    }
     return session;
   }
 
   async createSessionAsync(session: UserSession): Promise<UserSession> {
-    this.sessions.set(session.id, session);
     if (PostgresService.isDbConnected()) {
-      await RepositoryManager.getInstance().getRepositories().sessions.create(session);
+      const persisted = await RepositoryManager.getInstance().getRepositories().sessions.create(session);
+      this.sessions.set(session.id, persisted);
+      return persisted;
     }
+    this.sessions.set(session.id, session);
     return session;
   }
 
   getSession(sessionId: string): UserSession | undefined {
+    return this.sessions.get(sessionId);
+  }
+
+  async getSessionAsync(sessionId: string): Promise<UserSession | undefined> {
+    if (PostgresService.isDbConnected()) {
+      return await RepositoryManager.getInstance().getRepositories().sessions.findById(sessionId);
+    }
     return this.sessions.get(sessionId);
   }
 
@@ -2806,6 +2813,19 @@ class DatabaseEngine {
       .sort((a, b) => new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime());
   }
 
+  async listSessionsForUserAsync(userId: string, currentSessionId?: string): Promise<UserSession[]> {
+    if (PostgresService.isDbConnected()) {
+      const dbSessions = await RepositoryManager.getInstance().getRepositories().sessions.listForUser(userId);
+      return dbSessions
+        .filter((s) => !s.isRevoked)
+        .map((s) => ({
+          ...s,
+          isCurrent: s.id === currentSessionId,
+        }));
+    }
+    return this.listSessionsForUser(userId, currentSessionId);
+  }
+
   revokeSession(sessionId: string): boolean {
     this.revokedSessionIds.add(sessionId);
     const session = this.sessions.get(sessionId);
@@ -2822,22 +2842,14 @@ class DatabaseEngine {
       }
     }
 
-    if (PostgresService.isDbConnected()) {
-      RepositoryManager.getInstance()
-        .getRepositories()
-        .sessions.revoke(sessionId)
-        .catch((err) => logger.error('[DatabaseEngine] Falha ao revogar sessão no PostgreSQL:', err));
-    }
-
     return true;
   }
 
   async revokeSessionAsync(sessionId: string): Promise<boolean> {
-    const res = this.revokeSession(sessionId);
     if (PostgresService.isDbConnected()) {
       await RepositoryManager.getInstance().getRepositories().sessions.revoke(sessionId);
     }
-    return res;
+    return this.revokeSession(sessionId);
   }
 
   revokeAllSessionsForUser(userId: string, exceptSessionId?: string): number {
@@ -2859,44 +2871,37 @@ class DatabaseEngine {
       }
     }
 
-    if (PostgresService.isDbConnected()) {
-      RepositoryManager.getInstance()
-        .getRepositories()
-        .sessions.revokeAllForUser(userId)
-        .catch((err) => logger.error('[DatabaseEngine] Falha ao revogar sessões no PostgreSQL:', err));
-    }
-
     return count;
   }
 
   async revokeAllSessionsForUserAsync(userId: string, exceptSessionId?: string): Promise<number> {
-    const count = this.revokeAllSessionsForUser(userId, exceptSessionId);
     if (PostgresService.isDbConnected()) {
       await RepositoryManager.getInstance().getRepositories().sessions.revokeAllForUser(userId);
     }
-    return count;
+    return this.revokeAllSessionsForUser(userId, exceptSessionId);
   }
 
   // --- REFRESH TOKENS (PRD 02 - Seção 13) ---
 
   saveRefreshToken(token: RefreshToken) {
     this.refreshTokens.set(token.tokenHash, token);
-    if (PostgresService.isDbConnected()) {
-      RepositoryManager.getInstance()
-        .getRepositories()
-        .sessions.saveRefreshToken(token)
-        .catch((err) => logger.error('[DatabaseEngine] Falha ao salvar refresh token no PostgreSQL:', err));
-    }
   }
 
   async saveRefreshTokenAsync(token: RefreshToken): Promise<void> {
-    this.refreshTokens.set(token.tokenHash, token);
     if (PostgresService.isDbConnected()) {
       await RepositoryManager.getInstance().getRepositories().sessions.saveRefreshToken(token);
     }
+    this.refreshTokens.set(token.tokenHash, token);
   }
 
   getRefreshToken(tokenHash: string): RefreshToken | undefined {
+    return this.refreshTokens.get(tokenHash);
+  }
+
+  async getRefreshTokenAsync(tokenHash: string): Promise<RefreshToken | undefined> {
+    if (PostgresService.isDbConnected()) {
+      return await RepositoryManager.getInstance().getRepositories().sessions.getRefreshToken(tokenHash);
+    }
     return this.refreshTokens.get(tokenHash);
   }
 
@@ -2907,38 +2912,29 @@ class DatabaseEngine {
       rt.replacedByTokenHash = replacedByHash;
       this.refreshTokens.set(tokenHash, rt);
     }
-    if (PostgresService.isDbConnected()) {
-      RepositoryManager.getInstance()
-        .getRepositories()
-        .sessions.consumeRefreshToken(tokenHash, replacedByHash)
-        .catch((err) => logger.error('[DatabaseEngine] Falha ao consumir refresh token no PostgreSQL:', err));
-    }
   }
 
   async markRefreshTokenUsedAsync(tokenHash: string, replacedByHash: string): Promise<void> {
-    this.markRefreshTokenUsed(tokenHash, replacedByHash);
     if (PostgresService.isDbConnected()) {
       await RepositoryManager.getInstance().getRepositories().sessions.consumeRefreshToken(tokenHash, replacedByHash);
     }
+    this.markRefreshTokenUsed(tokenHash, replacedByHash);
   }
 
   // --- CONVITES (PRD 02 - Seção 40) ---
 
   createInvitation(invitation: Invitation): Invitation {
     this.invitations.set(invitation.id, invitation);
-    if (PostgresService.isDbConnected()) {
-      PostgresService.createInvitation(invitation).catch((err) =>
-        logger.error('[DatabaseEngine] Falha ao persistir convite no PostgreSQL:', err)
-      );
-    }
     return invitation;
   }
 
   async createInvitationAsync(invitation: Invitation): Promise<Invitation> {
-    this.invitations.set(invitation.id, invitation);
     if (PostgresService.isDbConnected()) {
-      return await PostgresService.createInvitation(invitation);
+      const persisted = await PostgresService.createInvitation(invitation);
+      this.invitations.set(invitation.id, persisted);
+      return persisted;
     }
+    this.invitations.set(invitation.id, invitation);
     return invitation;
   }
 
@@ -2957,31 +2953,23 @@ class DatabaseEngine {
     if (!inv) return false;
     inv.status = 'REVOKED';
     this.invitations.set(inviteId, inv);
-    if (PostgresService.isDbConnected()) {
-      PostgresService.revokeInvitation(inviteId).catch((err) =>
-        logger.error('[DatabaseEngine] Falha ao revogar convite no PostgreSQL:', err)
-      );
-    }
     return true;
   }
 
   async revokeInvitationAsync(inviteId: string): Promise<boolean> {
-    const res = this.revokeInvitation(inviteId);
     if (PostgresService.isDbConnected()) {
       await PostgresService.revokeInvitation(inviteId);
     }
-    return res;
+    return this.revokeInvitation(inviteId);
   }
 
   acceptInvitation(token: string, user: User): Membership | undefined {
     const inv = this.getInvitationByToken(token);
     if (!inv) return undefined;
 
-    // Atualiza status do convite
     inv.status = 'ACCEPTED';
     this.invitations.set(inv.id, inv);
 
-    // Cria nova membership ativa para a empresa
     const membership: Membership = {
       id: `mem-${crypto.randomUUID()}`,
       userId: user.id,
@@ -2998,17 +2986,37 @@ class DatabaseEngine {
     };
 
     this.memberships.set(membership.id, membership);
+    return membership;
+  }
+
+  async acceptInvitationAsync(token: string, user: User): Promise<Membership | undefined> {
+    const inv = this.getInvitationByToken(token);
+    if (!inv) return undefined;
+
+    inv.status = 'ACCEPTED';
+    this.invitations.set(inv.id, inv);
+
+    const membership: Membership = {
+      id: `mem-${crypto.randomUUID()}`,
+      userId: user.id,
+      companyId: inv.companyId,
+      role: inv.role,
+      permissions: ROLE_DEFAULT_PERMISSIONS[inv.role] || [],
+      status: 'ACTIVE',
+      isActive: true,
+      invitedAt: inv.createdAt,
+      acceptedAt: new Date().toISOString(),
+      joinedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
 
     if (PostgresService.isDbConnected()) {
-      PostgresService.acceptInvitation(token).catch((err) =>
-        logger.error('[DatabaseEngine] Falha ao aceitar convite no PostgreSQL:', err)
-      );
-      RepositoryManager.getInstance()
-        .getRepositories()
-        .memberships.create(membership)
-        .catch((err) => logger.error('[DatabaseEngine] Falha ao persistir membership no PostgreSQL:', err));
+      await PostgresService.acceptInvitation(token);
+      await RepositoryManager.getInstance().getRepositories().memberships.create(membership);
     }
 
+    this.memberships.set(membership.id, membership);
     return membership;
   }
 
@@ -3016,18 +3024,13 @@ class DatabaseEngine {
 
   savePasswordReset(reset: PasswordResetToken) {
     this.passwordResets.set(reset.token, reset);
-    if (PostgresService.isDbConnected()) {
-      PostgresService.savePasswordReset(reset).catch((err) =>
-        logger.error('[DatabaseEngine] Falha ao salvar recuperação de senha no PostgreSQL:', err)
-      );
-    }
   }
 
   async savePasswordResetAsync(reset: PasswordResetToken): Promise<void> {
-    this.passwordResets.set(reset.token, reset);
     if (PostgresService.isDbConnected()) {
       await PostgresService.savePasswordReset(reset);
     }
+    this.passwordResets.set(reset.token, reset);
   }
 
   getPasswordReset(token: string): PasswordResetToken | undefined {
@@ -3052,18 +3055,13 @@ class DatabaseEngine {
       pr.isUsed = true;
       this.passwordResets.set(token, pr);
     }
-    if (PostgresService.isDbConnected()) {
-      PostgresService.consumePasswordReset(token).catch((err) =>
-        logger.error('[DatabaseEngine] Falha ao consumir recuperação de senha no PostgreSQL:', err)
-      );
-    }
   }
 
   async consumePasswordResetAsync(token: string): Promise<void> {
-    this.consumePasswordReset(token);
     if (PostgresService.isDbConnected()) {
       await PostgresService.consumePasswordReset(token);
     }
+    this.consumePasswordReset(token);
   }
 
   // --- EVENTOS DE SEGURANÇA (PRD 02 - Seção 29) ---

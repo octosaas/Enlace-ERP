@@ -79,16 +79,37 @@ app.get(['/api/health', '/api/v1/health'], (_req, res) => {
 });
 
 app.get('/api/v1/health/readiness', async (_req, res) => {
-  await dbEngine.initialize();
-  const pgStatus = dbEngine.getPostgresStatus();
-  res.json({
-    status: 'ready',
-    database: pgStatus.isConnected ? 'postgresql-active' : 'in-memory-isolated',
-    postgres: pgStatus,
-    schemas: 'active',
-    authEngine: 'active',
-    timestamp: new Date().toISOString(),
-  });
+  try {
+    await dbEngine.initialize();
+    const pgStatus = dbEngine.getPostgresStatus();
+    const isAiStudioSandbox = !!(process.env.APPLET_ID || process.env.K_SERVICE?.startsWith('ais-'));
+    const isStrictProduction = process.env.NODE_ENV === 'production' && !isAiStudioSandbox;
+
+    if (isStrictProduction && !pgStatus.isConnected) {
+      return res.status(503).json({
+        status: 'not_ready',
+        error: 'PostgreSQL indisponível em ambiente de produção. O banco de dados é a fonte oficial da verdade.',
+        database: 'disconnected',
+        postgres: pgStatus,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    return res.status(200).json({
+      status: 'ready',
+      database: pgStatus.isConnected ? 'postgresql-active' : 'in-memory-isolated',
+      postgres: pgStatus,
+      schemas: 'active',
+      authEngine: 'active',
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    return res.status(503).json({
+      status: 'error',
+      error: err.message || 'Falha de inicialização da infraestrutura de banco de dados.',
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 app.get('/api/v1/health/liveness', (_req, res) => {

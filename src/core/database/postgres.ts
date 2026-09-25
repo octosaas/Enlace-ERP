@@ -67,12 +67,13 @@ export class PostgresService {
     this.connectionAttempted = true;
 
     const databaseUrl = process.env.DATABASE_URL;
-    const isProduction = process.env.NODE_ENV === 'production';
+    const isAiStudioSandbox = !!(process.env.APPLET_ID || process.env.K_SERVICE?.startsWith('ais-'));
+    const isProduction = process.env.NODE_ENV === 'production' && !isAiStudioSandbox;
 
     if (!databaseUrl) {
-      if (isProduction && process.env.STRICT_PRODUCTION_DB === 'true') {
+      if (isProduction) {
         const errorMsg =
-          '[FATAL] Configuração obrigatória DATABASE_URL ausente em ambiente de produção (NODE_ENV=production) com STRICT_PRODUCTION_DB=true. Fail-closed acionado. A aplicação não pode operar em produção sem PostgreSQL.';
+          '[FATAL] Configuração obrigatória DATABASE_URL ausente em ambiente de produção (NODE_ENV=production). Fail-closed acionado. A aplicação não pode operar em produção sem PostgreSQL.';
         logger.error(errorMsg);
         throw new Error(errorMsg);
       }
@@ -107,16 +108,15 @@ export class PostgresService {
 
       return true;
     } catch (err: any) {
-      if (isProduction && process.env.STRICT_PRODUCTION_DB === 'true') {
-        const errorMsg = `[FATAL] Falha de conexão ao PostgreSQL em ambiente de produção (NODE_ENV=production) com STRICT_PRODUCTION_DB=true: ${err.message}. Fail-closed acionado.`;
+      this.isConnected = false;
+      if (isProduction) {
+        const errorMsg = `[FATAL] Falha de conexão ao PostgreSQL em ambiente de produção (NODE_ENV=production): ${err.message}. Fail-closed acionado.`;
         logger.error(errorMsg);
-        this.isConnected = false;
         throw new Error(errorMsg);
       }
       logger.warn(
-        `[PostgresService] Falha ao conectar ao PostgreSQL (${err.message}). Operando em modo de contingência/reserva com persistência isolada por schema.`
+        `[PostgresService] Falha ao conectar ao PostgreSQL (${err.message}). Operando em modo de teste/desenvolvimento com persistência isolada por schema.`
       );
-      this.isConnected = false;
       return false;
     }
   }
