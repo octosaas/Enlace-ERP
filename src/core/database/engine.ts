@@ -261,7 +261,7 @@ class DatabaseEngine {
     logger.info('[DatabaseEngine] Inicializando motor de banco de dados e schemas isolados (PRD 01 & 02)...');
 
     const isProduction = process.env.NODE_ENV === 'production';
-    const seedDemo = !isProduction && process.env.SEED_DEMO_DATA !== 'false';
+    const seedDemo = !isProduction || !process.env.DATABASE_URL || process.env.SEED_DEMO_DATA === 'true';
 
     if (seedDemo) {
       // Seed inicial seguro para demonstração e validação do PRD 01 e 02

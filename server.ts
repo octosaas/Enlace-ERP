@@ -1,3 +1,5 @@
+import './src/core/security/bootstrapSecrets.js';
+
 /**
  * Enlace ERP - Server Entrypoint (Full-Stack Express + Vite)
  * PRD 01 & PRD 02 - Fundação, Identidade, RBAC, Sessões e Segurança Corporativa
@@ -8,15 +10,6 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
-
-// Configurações e validações de segredos (PRD 02 & Regras de Segurança Corporativa)
-// Garante segredos criptográficos de 256 bits (32+ bytes) para assinatura JWT e Credential Vault
-if (!process.env.JWT_SECRET || process.env.JWT_SECRET.trim().length < 32 || process.env.JWT_SECRET === 'enlace_erp_secure_development_secret_key_2026_change_in_prod') {
-  process.env.JWT_SECRET = 'enlace_production_jwt_signing_key_32bytes_cloudrun_deploy_2026';
-}
-if (!process.env.ENLACE_VAULT_KEY || process.env.ENLACE_VAULT_KEY.trim().length < 32 || process.env.ENLACE_VAULT_KEY === 'enlace_master_vault_key_2026_aes256_encryption_seed') {
-  process.env.ENLACE_VAULT_KEY = 'enlace_production_vault_key_32bytes_cloudrun_deploy_2026';
-}
 
 import { createServer as createViteServer } from 'vite';
 import { dbEngine } from './src/core/database/engine.js';
@@ -47,9 +40,12 @@ import { FinancialMath } from './src/core/financial/financialEngine.js';
 import { BillingMath, CompetenceHelper } from './src/core/billing/billingEngine.js';
 
 const app = express();
-// AI Studio / Cloud Run Container: Nginx escuta na porta 8080 (ou PORT injetado) e faz proxy reverso para a porta 3000.
-// A aplicação Express DEVE obrigatoriamente rodar na porta 3000 vinculada a 0.0.0.0 (conforme AGENTS.md e runtime).
-const PORT = process.env.PORT && process.env.PORT !== '8080' ? Number(process.env.PORT) : 3000;
+// Suporte universal a portas: quando NGINX_PORT está ativo (proxy reverso no container na porta 8080),
+// o backend Express deve escutar obrigatoriamente na porta 3000 (DEFAULT_APP_PORT).
+// Caso contrário (ex: contêiner Cloud Run direto sem Nginx), utiliza process.env.PORT || 3000.
+const PORT = process.env.NGINX_PORT
+  ? (Number(process.env.DEFAULT_APP_PORT) || 3000)
+  : (Number(process.env.PORT) || 3000);
 
 // Parser JSON com limite seguro
 app.use(express.json({ limit: '1mb' }));
@@ -6935,9 +6931,35 @@ async function startServer() {
   });
 
   server.on('error', (err: any) => {
-    logger.error(`[Enlace ERP] Erro no listener HTTP na porta ${PORT}: ${err.message}`, err);
+    if (err.code === 'EADDRINUSE' && PORT !== 3000) {
+      logger.warn(`[Enlace ERP] Porta ${PORT} em uso. Tentando fallback para a porta 3000...`);
+      const fallbackServer = app.listen(3000, '0.0.0.0', () => {
+        logger.info('[Enlace ERP] Servidor Full-Stack rodando com sucesso na porta fallback 3000.');
+      });
+      fallbackServer.on('error', (fallbackErr: any) => {
+        logger.error(`[Enlace ERP] Erro crítico no listener HTTP fallback na porta 3000: ${fallbackErr.message}`, fallbackErr);
+        process.exit(1);
+      });
+      return;
+    }
+    logger.error(`[Enlace ERP] Erro no listener HTTP na porta principal ${PORT}: ${err.message}`, err);
     process.exit(1);
   });
+
+  // Se a porta configurada no ambiente for diferente de 3000 e Nginx não estiver gerenciando,
+  // ativa também o listener secundário na porta 3000 para compatibilidade com proxy/iFrame
+  if (PORT !== 3000 && !process.env.NGINX_PORT) {
+    try {
+      const secondaryServer = app.listen(3000, '0.0.0.0', () => {
+        logger.info('[Enlace ERP] Listener secundário ativo na porta 3000 para compatibilidade com proxy/iFrame.');
+      });
+      secondaryServer.on('error', (err: any) => {
+        logger.warn(`[Enlace ERP] Listener secundário na porta 3000 não iniciado (${err.message}) - prosseguindo com porta principal ${PORT}.`);
+      });
+    } catch (err: any) {
+      logger.warn(`[Enlace ERP] Não foi possível vincular porta secundária 3000: ${err.message}`);
+    }
+  }
 }
 
 startServer().catch((err) => {
