@@ -41,6 +41,45 @@ export interface RecordSecurityEventParams {
 }
 
 export class AuditService {
+  private static sanitizeDetails(details?: Record<string, unknown>): Record<string, unknown> | undefined {
+    if (!details) return undefined;
+    const sensitiveKeys = new Set([
+      'password',
+      'passwordhash',
+      'passwordplain',
+      'token',
+      'refreshtoken',
+      'vaultsecret',
+      'vaultkey',
+      'enlacevaultkey',
+      'secret',
+      'jwt',
+      'jwtsecret',
+      'apikey',
+      'credential',
+      'privatekey',
+      'authorization',
+      'bearer',
+    ]);
+    const cleaned: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(details)) {
+      const lower = k.toLowerCase().replace(/[^a-z]/g, '');
+      if (
+        sensitiveKeys.has(lower) ||
+        lower.includes('password') ||
+        lower.includes('secret') ||
+        lower.includes('token')
+      ) {
+        cleaned[k] = '[REDACTED]';
+      } else if (v && typeof v === 'object' && !Array.isArray(v)) {
+        cleaned[k] = this.sanitizeDetails(v as Record<string, unknown>);
+      } else {
+        cleaned[k] = v;
+      }
+    }
+    return cleaned;
+  }
+
   static record(params: RecordAuditParams): AuditLogEntry {
     const entry: AuditLogEntry = {
       id: crypto.randomUUID(),
@@ -57,7 +96,7 @@ export class AuditService {
       ipAddress: params.ipAddress,
       userAgent: params.userAgent,
       requestId: params.requestId,
-      details: params.details,
+      details: this.sanitizeDetails(params.details),
     };
 
     // Se houver schema de tenant associado, grava no schema operacional do tenant
@@ -115,7 +154,7 @@ export class AuditService {
       ipAddress: params.ipAddress,
       userAgent: params.userAgent,
       requestId: params.requestId,
-      details: params.details,
+      details: this.sanitizeDetails(params.details) || {},
       mitigationTaken: params.mitigationTaken,
     };
 

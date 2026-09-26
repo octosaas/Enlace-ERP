@@ -23,7 +23,7 @@ import { PERMISSIONS, ROLE_DEFAULT_PERMISSIONS } from './src/shared/permissions.
 import { AuditService } from './src/core/audit/service.js';
 import { AppError, ForbiddenError, UnauthorizedError, NotFoundError } from './src/core/errors/index.js';
 import { logger } from './src/core/logger/index.js';
-import { SecurityTestResult, UserRole } from './src/shared/types.js';
+import { SecurityTestResult, UserRole, Receivable, Collection, PaymentRecord, PaymentProviderConfig } from './src/shared/types.js';
 import { createRateLimitMiddleware, rateLimiter } from './src/core/security/rateLimiter.js';
 import { CredentialVault } from './src/core/security/vault.js';
 import { AIPrincipalManager } from './src/core/security/aiPrincipal.js';
@@ -245,7 +245,7 @@ app.get('/api/v1/auth/me', authMiddleware, async (req: Request, res: Response) =
     // Fallback se repositórios não inicializados
   }
 
-  if (companies.length === 0) {
+  if (companies.length === 0 && !PostgresService.isDbConnected()) {
     companies = dbEngine.listCompaniesForUser(user.id);
   }
 
@@ -345,7 +345,7 @@ app.get('/api/v1/auth/sessions', authMiddleware, async (req: Request, res: Respo
     // Fallback se repositórios não estiverem disponíveis
   }
 
-  if (sessions.length === 0) {
+  if (sessions.length === 0 && !PostgresService.isDbConnected()) {
     sessions = dbEngine.listSessionsForUser(req.user!.id, req.sessionId);
   }
 
@@ -361,14 +361,16 @@ app.delete('/api/v1/auth/sessions/:sessionId', authMiddleware, async (req: Reque
   const repos = RepositoryManager.getInstance().getRepositories();
   const targetSession =
     (await repos.sessions.findById(req.params.sessionId)) ||
-    dbEngine.getSession(req.params.sessionId);
+    (!PostgresService.isDbConnected() ? dbEngine.getSession(req.params.sessionId) : undefined);
 
   if (!targetSession || targetSession.userId !== req.user!.id) {
     throw new NotFoundError('Sessão');
   }
 
   await repos.sessions.revoke(req.params.sessionId, 'Revogada pelo usuário');
-  dbEngine.revokeSession(req.params.sessionId);
+  if (!PostgresService.isDbConnected()) {
+    dbEngine.revokeSession(req.params.sessionId);
+  }
 
   await AuditService.recordAsync({
     userId: req.user!.id,
@@ -593,7 +595,7 @@ app.get(
       // Fallback
     }
 
-    if (members.length === 0) {
+    if (members.length === 0 && !PostgresService.isDbConnected()) {
       members = dbEngine.listMembersForCompany(activeCompany!.id);
     }
 
@@ -1125,15 +1127,29 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.CUSTOMERS_READ),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const { search, role, status } = req.query;
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const partners = dbEngine.listPartners(schemaNamespace!, {
-      search: search as string,
-      role: role as string,
-      status: status as string,
-    });
+    let partners: any[] = [];
+    try {
+      partners = await repos.partners.list(cleanCnpj, {
+        search: search as string,
+        role: role as string,
+        status: status as string,
+      });
+    } catch {
+      // Fallback
+    }
+    if (partners.length === 0 && !PostgresService.isDbConnected()) {
+      partners = dbEngine.listPartners(schemaNamespace!, {
+        search: search as string,
+        role: role as string,
+        status: status as string,
+      });
+    }
 
     res.json({
       success: true,
@@ -1153,11 +1169,16 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.CUSTOMERS_READ),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const { id } = req.params;
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const partner = dbEngine.getPartnerById(schemaNamespace!, id);
+    let partner = await repos.partners.findById(cleanCnpj, id);
+    if (!partner && !PostgresService.isDbConnected()) {
+      partner = dbEngine.getPartnerById(schemaNamespace!, id);
+    }
     if (!partner) {
       throw new NotFoundError('Parceiro de negócio não encontrado neste tenant.');
     }
@@ -1663,9 +1684,20 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PRODUCTS_VIEW),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
-    const products = dbEngine.listProducts(schemaNamespace!);
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
+
+    let products: any[] = [];
+    try {
+      products = await repos.products.list(cleanCnpj);
+    } catch {
+      // Fallback
+    }
+    if (products.length === 0 && !PostgresService.isDbConnected()) {
+      products = dbEngine.listProducts(schemaNamespace!);
+    }
 
     res.json({
       success: true,
@@ -1773,9 +1805,20 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.QUOTES_VIEW),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
-    const quotes = dbEngine.listQuotes(schemaNamespace!);
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
+
+    let quotes: any[] = [];
+    try {
+      quotes = await repos.sales.listQuotes(cleanCnpj);
+    } catch {
+      // Fallback
+    }
+    if (quotes.length === 0 && !PostgresService.isDbConnected()) {
+      quotes = dbEngine.listQuotes(schemaNamespace!);
+    }
 
     res.json({
       success: true,
@@ -1791,10 +1834,16 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.QUOTES_VIEW),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace } = req.tenantContext!;
-    const quote = dbEngine.getQuoteById(schemaNamespace!, id);
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
+
+    let quote = await repos.sales.findQuoteById(cleanCnpj, id);
+    if (!quote && !PostgresService.isDbConnected()) {
+      quote = dbEngine.getQuoteById(schemaNamespace!, id);
+    }
 
     if (!quote) {
       throw new NotFoundError('Orçamento');
@@ -1998,9 +2047,20 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.SALES_VIEW),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
-    const sales = dbEngine.listSales(schemaNamespace!);
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
+
+    let sales: any[] = [];
+    try {
+      sales = await repos.sales.listSales(cleanCnpj);
+    } catch {
+      // Fallback
+    }
+    if (sales.length === 0 && !PostgresService.isDbConnected()) {
+      sales = dbEngine.listSales(schemaNamespace!);
+    }
 
     res.json({
       success: true,
@@ -2016,10 +2076,16 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.SALES_VIEW),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace } = req.tenantContext!;
-    const sale = dbEngine.getSaleById(schemaNamespace!, id);
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
+
+    let sale = await repos.sales.findSaleById(cleanCnpj, id);
+    if (!sale && !PostgresService.isDbConnected()) {
+      sale = dbEngine.getSaleById(schemaNamespace!, id);
+    }
 
     if (!sale) throw new NotFoundError('Venda');
 
@@ -2160,9 +2226,20 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.CONTRACTS_VIEW),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
-    const contracts = dbEngine.listContracts(schemaNamespace!);
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
+
+    let contracts: any[] = [];
+    try {
+      contracts = await repos.sales.listContracts(cleanCnpj);
+    } catch {
+      // Fallback
+    }
+    if (contracts.length === 0 && !PostgresService.isDbConnected()) {
+      contracts = dbEngine.listContracts(schemaNamespace!);
+    }
 
     res.json({
       success: true,
@@ -2178,10 +2255,16 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.CONTRACTS_VIEW),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace } = req.tenantContext!;
-    const contract = dbEngine.getContractById(schemaNamespace!, id);
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
+
+    let contract = await repos.sales.findContractById(cleanCnpj, id);
+    if (!contract && !PostgresService.isDbConnected()) {
+      contract = dbEngine.getContractById(schemaNamespace!, id);
+    }
 
     if (!contract) throw new NotFoundError('Contrato');
 
@@ -2288,9 +2371,20 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.SERVICE_ORDERS_VIEW),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
-    const oss = dbEngine.listServiceOrders(schemaNamespace!);
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
+
+    let oss: any[] = [];
+    try {
+      oss = await repos.sales.listServiceOrders(cleanCnpj);
+    } catch {
+      // Fallback
+    }
+    if (oss.length === 0 && !PostgresService.isDbConnected()) {
+      oss = dbEngine.listServiceOrders(schemaNamespace!);
+    }
 
     res.json({
       success: true,
@@ -2306,10 +2400,16 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.SERVICE_ORDERS_VIEW),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace } = req.tenantContext!;
-    const os = dbEngine.getServiceOrderById(schemaNamespace!, id);
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
+
+    let os = await repos.sales.findServiceOrderById(cleanCnpj, id);
+    if (!os && !PostgresService.isDbConnected()) {
+      os = dbEngine.getServiceOrderById(schemaNamespace!, id);
+    }
 
     if (!os) throw new NotFoundError('Ordem de Serviço');
 
@@ -2595,11 +2695,21 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECEIVABLES_READ),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const { status, customerId } = req.query as { status?: string; customerId?: string };
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const list = dbEngine.listAccountsReceivable(schemaNamespace!, { status, customerId });
+    let list: any[] = [];
+    try {
+      list = await repos.receivables.listReceivables(cleanCnpj, { status, customerId });
+    } catch {
+      // Fallback
+    }
+    if (list.length === 0 && !PostgresService.isDbConnected()) {
+      list = dbEngine.listAccountsReceivable(schemaNamespace!, { status, customerId });
+    }
 
     res.json({
       success: true,
@@ -2615,11 +2725,16 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECEIVABLES_READ),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace } = req.tenantContext!;
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const title = dbEngine.getAccountReceivableById(schemaNamespace!, id);
+    let title: any = await repos.receivables.findReceivableById(cleanCnpj, id);
+    if (!title && !PostgresService.isDbConnected()) {
+      title = dbEngine.getAccountReceivableById(schemaNamespace!, id);
+    }
     if (!title) throw new NotFoundError('Título a Receber');
 
     res.json({
@@ -2815,11 +2930,21 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PAYABLES_READ),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const { status, supplierId } = req.query as { status?: string; supplierId?: string };
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const list = dbEngine.listAccountsPayable(schemaNamespace!, { status, supplierId });
+    let list: any[] = [];
+    try {
+      list = await repos.financial.listPayables(cleanCnpj, { status, supplierId });
+    } catch {
+      // Fallback
+    }
+    if (list.length === 0 && !PostgresService.isDbConnected()) {
+      list = dbEngine.listAccountsPayable(schemaNamespace!, { status, supplierId });
+    }
 
     res.json({
       success: true,
@@ -2835,11 +2960,16 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PAYABLES_READ),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { id } = req.params;
     const { schemaNamespace } = req.tenantContext!;
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const title = dbEngine.getAccountPayableById(schemaNamespace!, id);
+    let title = await repos.financial.findPayableById(cleanCnpj, id);
+    if (!title && !PostgresService.isDbConnected()) {
+      title = dbEngine.getAccountPayableById(schemaNamespace!, id);
+    }
     if (!title) throw new NotFoundError('Título a Pagar');
 
     res.json({
@@ -3031,9 +3161,20 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.TREASURY_READ),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
-    const accounts = dbEngine.listBankAccounts(schemaNamespace!);
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
+
+    let accounts: any[] = [];
+    try {
+      accounts = await repos.financial.listBankAccounts(cleanCnpj);
+    } catch {
+      // Fallback
+    }
+    if (accounts.length === 0 && !PostgresService.isDbConnected()) {
+      accounts = dbEngine.listBankAccounts(schemaNamespace!);
+    }
 
     res.json({
       success: true,
@@ -4418,17 +4559,30 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.BILLING_VIEW),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const { status, customerId, sourceType, competence, search } = req.query;
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const documents = dbEngine.getBillingDocuments(schemaNamespace!, {
-      status: status as string,
-      customerId: customerId as string,
-      sourceType: sourceType as string,
-      competence: competence as string,
-      search: search as string,
-    });
+    let documents: any[] = [];
+    try {
+      documents = await repos.billing.listBilling(cleanCnpj, {
+        status: status as string,
+        customerId: customerId as string,
+      });
+    } catch {
+      // Fallback
+    }
+    if (documents.length === 0 && !PostgresService.isDbConnected()) {
+      documents = dbEngine.getBillingDocuments(schemaNamespace!, {
+        status: status as string,
+        customerId: customerId as string,
+        sourceType: sourceType as string,
+        competence: competence as string,
+        search: search as string,
+      });
+    }
 
     res.json({
       success: true,
@@ -4444,11 +4598,16 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.BILLING_VIEW),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const { id } = req.params;
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const document = dbEngine.getBillingDocumentById(schemaNamespace!, id);
+    let document = await repos.billing.findBillingById(cleanCnpj, id);
+    if (!document && !PostgresService.isDbConnected()) {
+      document = dbEngine.getBillingDocumentById(schemaNamespace!, id);
+    }
     if (!document) {
       throw new NotFoundError(`Documento de faturamento [${id}] não encontrado.`);
     }
@@ -4660,15 +4819,31 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECURRING_BILLING_VIEW),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const { status, customerId, search } = req.query;
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const recurrings = dbEngine.getRecurringBillings(schemaNamespace!, {
-      status: status as string,
-      customerId: customerId as string,
-      search: search as string,
-    });
+    let recurrings: any[] = [];
+    try {
+      recurrings = await repos.billing.listRecurring(cleanCnpj);
+      if (status) {
+        recurrings = recurrings.filter((r) => r.status === status);
+      }
+      if (customerId) {
+        recurrings = recurrings.filter((r) => r.customerId === customerId);
+      }
+    } catch {
+      // Fallback
+    }
+    if (recurrings.length === 0 && !PostgresService.isDbConnected()) {
+      recurrings = dbEngine.getRecurringBillings(schemaNamespace!, {
+        status: status as string,
+        customerId: customerId as string,
+        search: search as string,
+      });
+    }
 
     res.json({
       success: true,
@@ -4704,11 +4879,16 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECURRING_BILLING_VIEW),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const { id } = req.params;
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const recurring = dbEngine.getRecurringBillingById(schemaNamespace!, id);
+    let recurring = await repos.billing.findRecurringById(cleanCnpj, id);
+    if (!recurring && !PostgresService.isDbConnected()) {
+      recurring = dbEngine.getRecurringBillingById(schemaNamespace!, id);
+    }
     if (!recurring) {
       throw new NotFoundError(`Faturamento recorrente [${id}] não encontrado.`);
     }
@@ -6437,17 +6617,27 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECEIVABLES_READ),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const { status, customerId, startDate, endDate, isOverdue } = req.query;
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const list = dbEngine.listReceivables(schemaNamespace!, {
-      status: status as string,
-      customerId: customerId as string,
-      startDate: startDate as string,
-      endDate: endDate as string,
-      isOverdue: isOverdue === 'true',
-    });
+    let list: Receivable[] = [];
+    if (PostgresService.isDbConnected()) {
+      list = await repos.receivables.listReceivables(cleanCnpj, {
+        status: status as string,
+        customerId: customerId as string,
+      });
+    } else {
+      list = dbEngine.listReceivables(schemaNamespace!, {
+        status: status as string,
+        customerId: customerId as string,
+        startDate: startDate as string,
+        endDate: endDate as string,
+        isOverdue: isOverdue === 'true',
+      });
+    }
 
     res.json({
       success: true,
@@ -6497,11 +6687,18 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.RECEIVABLES_READ),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const { id } = req.params;
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const rec = dbEngine.getReceivable(schemaNamespace!, id);
+    let rec: Receivable | undefined;
+    if (PostgresService.isDbConnected()) {
+      rec = await repos.receivables.findReceivableById(cleanCnpj, id);
+    } else {
+      rec = dbEngine.getReceivable(schemaNamespace!, id);
+    }
     if (!rec) throw new NotFoundError(`Conta a receber [${id}] não encontrada.`);
 
     res.json({
@@ -6582,15 +6779,28 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.COLLECTIONS_READ),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const { receivableId, method, status } = req.query;
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const list = dbEngine.listCollections(schemaNamespace!, {
-      receivableId: receivableId as string,
-      method: method as string,
-      status: status as string,
-    });
+    let list: Collection[] = [];
+    if (PostgresService.isDbConnected()) {
+      list = await repos.receivables.listCollections(cleanCnpj, receivableId as string | undefined);
+      if (status) {
+        list = list.filter((c) => c.status === status);
+      }
+      if (method) {
+        list = list.filter((c) => c.method === method);
+      }
+    } else {
+      list = dbEngine.listCollections(schemaNamespace!, {
+        receivableId: receivableId as string,
+        method: method as string,
+        status: status as string,
+      });
+    }
 
     res.json({
       success: true,
@@ -6626,11 +6836,18 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.COLLECTIONS_READ),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const { id } = req.params;
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const col = dbEngine.getCollection(schemaNamespace!, id);
+    let col: Collection | undefined;
+    if (PostgresService.isDbConnected()) {
+      col = await repos.receivables.findCollectionById(cleanCnpj, id);
+    } else {
+      col = dbEngine.getCollection(schemaNamespace!, id);
+    }
     if (!col) throw new NotFoundError(`Cobrança [${id}] não encontrada.`);
 
     res.json({
@@ -6705,13 +6922,20 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PAYMENTS_READ),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const { receivableId } = req.query;
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const list = dbEngine.listPaymentsV2(schemaNamespace!, {
-      receivableId: receivableId as string,
-    });
+    let list: PaymentRecord[] = [];
+    if (PostgresService.isDbConnected()) {
+      list = await repos.receivables.listPayments(cleanCnpj, receivableId as string | undefined);
+    } else {
+      list = dbEngine.listPaymentsV2(schemaNamespace!, {
+        receivableId: receivableId as string,
+      });
+    }
 
     res.json({
       success: true,
@@ -6753,9 +6977,17 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PAYMENT_PROVIDERS_READ),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
-    const list = dbEngine.listPaymentProviders(schemaNamespace!);
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
+
+    let list: PaymentProviderConfig[] = [];
+    if (PostgresService.isDbConnected()) {
+      list = await repos.receivables.listPaymentProviders(cleanCnpj);
+    } else {
+      list = dbEngine.listPaymentProviders(schemaNamespace!);
+    }
 
     res.json({
       success: true,
@@ -6787,11 +7019,19 @@ app.get(
   authMiddleware,
   tenantMiddleware,
   requirePermission(PERMISSIONS.PAYMENT_PROVIDERS_READ),
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response) => {
     const { schemaNamespace } = req.tenantContext!;
     const { id } = req.params;
+    const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+    const repos = RepositoryManager.getInstance().getRepositories();
 
-    const prov = dbEngine.getPaymentProvider(schemaNamespace!, id);
+    let prov: PaymentProviderConfig | undefined;
+    if (PostgresService.isDbConnected()) {
+      const all = await repos.receivables.listPaymentProviders(cleanCnpj);
+      prov = all.find((p) => p.id === id);
+    } else {
+      prov = dbEngine.getPaymentProvider(schemaNamespace!, id);
+    }
     if (!prov) throw new NotFoundError(`Provedor [${id}] não encontrado.`);
 
     res.json({

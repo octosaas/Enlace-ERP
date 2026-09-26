@@ -185,9 +185,9 @@ export class AuthService {
         }
       }
     } catch {
-      // Fallback para ambiente in-memory
+      // Fallback para ambiente in-memory apenas se PG não conectado
     }
-    if (companies.length === 0) {
+    if (companies.length === 0 && !PostgresService.isDbConnected()) {
       companies = dbEngine.listCompaniesForUser(user.id);
     }
 
@@ -227,7 +227,9 @@ export class AuthService {
     };
 
     const persistedSession = await repos.sessions.create(session);
-    await dbEngine.createSessionAsync(persistedSession);
+    if (!PostgresService.isDbConnected()) {
+      await dbEngine.createSessionAsync(persistedSession);
+    }
 
     // Salva o Refresh Token associado (PRD 02 - Seção 13)
     const storedRt: RefreshToken = {
@@ -241,7 +243,9 @@ export class AuthService {
       expiresAt: refreshExpiresAt,
     };
     await repos.sessions.saveRefreshToken(storedRt);
-    await dbEngine.saveRefreshTokenAsync(storedRt);
+    if (!PostgresService.isDbConnected()) {
+      await dbEngine.saveRefreshTokenAsync(storedRt);
+    }
 
     return {
       token,
@@ -341,10 +345,11 @@ export class AuthService {
   }): Promise<{ token: string; refreshToken: string }> {
     const tokenHash = crypto.createHash('sha256').update(params.refreshTokenPlain).digest('hex');
     const repos = RepositoryManager.getInstance().getRepositories();
+    const isPg = PostgresService.isDbConnected();
 
-    // Consulta no PostgreSQL primeiro, com fallback para memória se operando em modo de teste
+    // Consulta no PostgreSQL primeiro, com fallback para memória apenas em ambiente de teste/sandbox sem PG
     let storedRt = await repos.sessions.getRefreshToken(tokenHash);
-    if (!storedRt) {
+    if (!storedRt && !isPg) {
       storedRt = dbEngine.getRefreshToken(tokenHash);
     }
 
@@ -356,7 +361,9 @@ export class AuthService {
     if (storedRt.isUsed) {
       // Invalida toda a árvore de sessões do usuário imediatamente no banco!
       await repos.sessions.revokeAllForUser(storedRt.userId, 'Token reuse detected');
-      await dbEngine.revokeAllSessionsForUserAsync(storedRt.userId);
+      if (!isPg) {
+        await dbEngine.revokeAllSessionsForUserAsync(storedRt.userId);
+      }
 
       AuditService.recordSecurityEvent({
         type: 'SECURITY_TOKEN_REUSE_DETECTED',
@@ -380,12 +387,45 @@ export class AuthService {
       throw new UnauthorizedError('Refresh token expirado. Faça login novamente.');
     }
 
-    const session = (await repos.sessions.findById(storedRt.sessionId)) || dbEngine.getSession(storedRt.sessionId);
+    const newRefreshTokenPlain = `rt-${crypto.randomBytes(32).toString('hex')}`;
+    const newRefreshTokenHash = crypto.createHash('sha256').update(newRefreshTokenPlain).digest('hex');
+
+    // Consome atomicamente o token anterior (prevenção de corrida concorrente Request A vs Request B)
+    const consumed = await repos.sessions.consumeRefreshToken(tokenHash, newRefreshTokenHash);
+    if (!isPg) {
+      await dbEngine.markRefreshTokenUsedAsync(tokenHash, newRefreshTokenHash);
+    }
+
+    if (!consumed) {
+      await repos.sessions.revokeAllForUser(storedRt.userId, 'Concurrent token reuse detected');
+      if (!isPg) {
+        await dbEngine.revokeAllSessionsForUserAsync(storedRt.userId);
+      }
+
+      AuditService.recordSecurityEvent({
+        type: 'SECURITY_TOKEN_REUSE_DETECTED',
+        severity: 'CRITICAL',
+        userId: storedRt.userId,
+        ipAddress: params.ipAddress,
+        userAgent: params.userAgent,
+        requestId: params.requestId || 'req-unknown',
+        details: {
+          tokenHash,
+          sessionId: storedRt.sessionId,
+          reason: 'Tentativa concorrente de consumo do mesmo refresh token detectada.',
+        },
+        mitigationTaken: 'Todas as sessões ativas do usuário foram invalidadas preventivamente.',
+      });
+
+      throw new UnauthorizedError('Tentativa de reutilização de token detectada. Todas as sessões foram encerradas por segurança.');
+    }
+
+    const session = (await repos.sessions.findById(storedRt.sessionId)) || (!isPg ? dbEngine.getSession(storedRt.sessionId) : undefined);
     if (!session || session.isRevoked) {
       throw new UnauthorizedError('Sessão associada foi revogada.');
     }
 
-    const user = (await repos.users.findById(storedRt.userId)) || dbEngine.getUserById(storedRt.userId);
+    const user = (await repos.users.findById(storedRt.userId)) || (!isPg ? dbEngine.getUserById(storedRt.userId) : undefined);
     if (!user || user.status !== 'ACTIVE') {
       throw new UnauthorizedError('Conta inativa.');
     }
@@ -403,13 +443,6 @@ export class AuthService {
       { expiresIn: ACCESS_TOKEN_EXPIRATION }
     );
 
-    const newRefreshTokenPlain = `rt-${crypto.randomBytes(32).toString('hex')}`;
-    const newRefreshTokenHash = crypto.createHash('sha256').update(newRefreshTokenPlain).digest('hex');
-
-    // Marca o token anterior como consumido no PostgreSQL e na camada de compatibilidade
-    await repos.sessions.consumeRefreshToken(tokenHash, newRefreshTokenHash);
-    await dbEngine.markRefreshTokenUsedAsync(tokenHash, newRefreshTokenHash);
-
     // Salva o novo refresh token no PostgreSQL
     const newRtRecord: RefreshToken = {
       id: `rtk-${crypto.randomUUID()}`,
@@ -422,7 +455,9 @@ export class AuthService {
       expiresAt: new Date(Date.now() + REFRESH_TOKEN_DAYS * 24 * 60 * 60 * 1000).toISOString(),
     };
     await repos.sessions.saveRefreshToken(newRtRecord);
-    await dbEngine.saveRefreshTokenAsync(newRtRecord);
+    if (!isPg) {
+      await dbEngine.saveRefreshTokenAsync(newRtRecord);
+    }
 
     return {
       token: newAccessToken,

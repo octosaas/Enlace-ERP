@@ -22,6 +22,8 @@ import { PostgresService } from '../src/core/database/postgres.js';
 import { RepositoryManager } from '../src/core/database/repositories/index.js';
 import { CredentialVault } from '../src/core/security/vault.js';
 import { UnauthorizedError, ForbiddenError } from '../src/core/errors/index.js';
+import { tenantMiddleware } from '../src/core/middleware/tenant.js';
+import { AuditService } from '../src/core/audit/service.js';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 
@@ -444,6 +446,305 @@ async function runProductionReadinessTests() {
     assert(
       readiness503Status,
       '14. Readiness: /api/v1/health/readiness recusa HTTP 200 e declara 503 se PostgreSQL estiver desconectado'
+    );
+  }
+
+  // -------------------------------------------------------------
+  // TESTE 15: HTTP BOLA / IDOR - Validação de Matriz de Acesso Tenant
+  // -------------------------------------------------------------
+  {
+    const alfa = dbEngine.getCompanyByCnpj('12345678000195')!;
+    const beta = dbEngine.getCompanyByCnpj('98765432000110')!;
+    const userCarlos = dbEngine.getUserByEmail('carlos@alfa.com.br')!;
+    const userMariana = dbEngine.getUserByEmail('mariana@beta.com.br')!;
+
+    // Helper para executar tenantMiddleware
+    const runMiddleware = async (user: any, companyId: string) => {
+      let nextError: any = null;
+      let nextCalled = false;
+      const req: any = {
+        user,
+        headers: { 'x-enlace-company-id': companyId },
+        query: {},
+        originalUrl: '/api/v1/partners',
+        requestId: 'req-test-bola',
+        ip: '127.0.0.1',
+        get: (h: string) => (h.toLowerCase() === 'user-agent' ? 'TestAgent' : undefined),
+      };
+      const res: any = {};
+      await tenantMiddleware(req, res, ((err?: any) => {
+        nextCalled = true;
+        nextError = err;
+      }) as any);
+      return { nextCalled, nextError, tenantContext: req.tenantContext };
+    };
+
+    // 1. Usuário Carlos (Alfa) acessando Empresa Alfa -> Permite (HTTP 200)
+    const carlosAlfa = await runMiddleware(userCarlos, alfa.id);
+    const carlosAlfaOk = carlosAlfa.nextCalled && !carlosAlfa.nextError && carlosAlfa.tenantContext?.schemaNamespace === alfa.schemaNamespace;
+
+    // 2. Usuário Carlos (Alfa) tentando acessar Empresa Beta -> Bloqueia (HTTP 403)
+    const carlosBeta = await runMiddleware(userCarlos, beta.id);
+    const carlosBetaBlocked = carlosBeta.nextError instanceof ForbiddenError;
+
+    // 3. Usuário Mariana (Beta) acessando Empresa Beta -> Permite (HTTP 200)
+    const marianaBeta = await runMiddleware(userMariana, beta.id);
+    const marianaBetaOk = marianaBeta.nextCalled && !marianaBeta.nextError && marianaBeta.tenantContext?.schemaNamespace === beta.schemaNamespace;
+
+    // 4. Usuário Mariana (Beta) tentando acessar Empresa Alfa -> Bloqueia (HTTP 403)
+    const marianaAlfa = await runMiddleware(userMariana, alfa.id);
+    const marianaAlfaBlocked = marianaAlfa.nextError instanceof ForbiddenError;
+
+    assert(
+      carlosAlfaOk && carlosBetaBlocked && marianaBetaOk && marianaAlfaBlocked,
+      '15. HTTP BOLA/IDOR: Matriz Tenant A=200/B=403 e Tenant B=200/A=403 estritamente validada'
+    );
+  }
+
+  // -------------------------------------------------------------
+  // TESTE 16: ISOLAMENTO CRUZADO DE RECURSOS POR SCHEMA (10 MÓDULOS)
+  // -------------------------------------------------------------
+  {
+    const alfa = dbEngine.getCompanyByCnpj('12345678000195')!;
+    const beta = dbEngine.getCompanyByCnpj('98765432000110')!;
+    const cleanAlfa = alfa.cleanCnpj;
+    const cleanBeta = beta.cleanCnpj;
+    const repos = RepositoryManager.getInstance().getRepositories();
+
+    // 1. Partners / Customers
+    const partnerBeta = await repos.partners.create(cleanBeta, {
+      id: `part-${crypto.randomUUID().slice(0, 8)}`,
+      personType: 'PJ',
+      name: 'Cliente Exclusivo Beta Ltda',
+      tradeName: 'Beta Exclusivo',
+      document: '99887766000155',
+      formattedDocument: '99.887.766/0001-55',
+      roles: ['CLIENTE'],
+      email: 'beta@cliente.com.br',
+      phone: '(11) 98888-7777',
+      address: {
+        zipCode: '01001-000',
+        street: 'Rua Beta',
+        number: '10',
+        neighborhood: 'Bairro Beta',
+        city: 'São Paulo',
+        state: 'SP',
+      },
+      creditLimit: 50000,
+      paymentTermsDays: 30,
+      status: 'ATIVO',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const partnerLookupInAlfa = await repos.partners.findById(cleanAlfa, partnerBeta.id);
+
+    // 2. Products / Estoque
+    const productBeta = await repos.products.create(cleanBeta, {
+      id: `prod-${crypto.randomUUID().slice(0, 8)}`,
+      code: 'PRD-BETA-01',
+      name: 'Item Exclusivo Beta',
+      type: 'PRODUCT',
+      description: 'Item Exclusivo Beta',
+      unit: 'UN',
+      unitPrice: 250.0,
+      costPrice: 120.0,
+      status: 'ATIVO',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const productLookupInAlfa = await repos.products.findById(cleanAlfa, productBeta.id);
+
+    const userMariana = dbEngine.getUserByEmail('mariana@beta.com.br')!;
+
+    // 3. Sales / Pedidos
+    const saleBeta = await repos.sales.createSale(cleanBeta, {
+      id: `sale-${crypto.randomUUID().slice(0, 8)}`,
+      number: 'VEN-BETA-999',
+      customerId: partnerBeta.id,
+      customerName: partnerBeta.name,
+      total: 500.0,
+      subtotal: 500.0,
+      discount: 0,
+      surcharge: 0,
+      saleDate: '2026-09-26',
+      sourceType: 'MANUAL',
+      status: 'CONFIRMED',
+      items: [],
+      createdBy: userMariana.name,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const saleLookupInAlfa = await repos.sales.findSaleById(cleanAlfa, saleBeta.id);
+
+    // 4. Billing / Faturamento
+    const billingBeta = await repos.billing.createBilling(cleanBeta, {
+      id: `bill-${crypto.randomUUID().slice(0, 8)}`,
+      instanceId: beta.schemaNamespace,
+      number: 'FAT-BETA-100',
+      customerId: partnerBeta.id,
+      customerName: partnerBeta.name,
+      subtotal: 500.0,
+      discount: 0,
+      surcharge: 0,
+      total: 500.0,
+      status: 'ISSUED',
+      sourceType: 'MANUAL',
+      items: [],
+      issueDate: '2026-09-26',
+      competenceStart: '2026-09-01',
+      competenceEnd: '2026-09-30',
+      competenceLabel: '09/2026',
+      dueDate: '2026-10-30',
+      createdBy: userMariana.name,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const billingLookupInAlfa = await repos.billing.findBillingById(cleanAlfa, billingBeta.id);
+
+    // 5. Receivables / Contas a Receber
+    const recBeta = await repos.receivables.createReceivable(cleanBeta, {
+      id: `rec-${crypto.randomUUID().slice(0, 8)}`,
+      instanceId: `inst-${crypto.randomUUID().slice(0, 8)}`,
+      customerId: partnerBeta.id,
+      customerName: partnerBeta.name,
+      customerDocument: '99887766000155',
+      originalAmount: 500.0,
+      paidAmount: 0,
+      remainingAmount: 500.0,
+      currentAmount: 500.0,
+      issueDate: '2026-09-26',
+      dueDate: '2026-10-30',
+      status: 'PENDING',
+      description: 'Cobrança Teste Beta',
+      discountAmount: 0,
+      interestAmount: 0,
+      fineAmount: 0,
+      installments: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const recLookupInAlfa = await repos.receivables.findReceivableById(cleanAlfa, recBeta.id);
+
+    // 6. Collections / Cobrança
+    const colBeta = await repos.receivables.createCollection(cleanBeta, {
+      id: `col-${crypto.randomUUID().slice(0, 8)}`,
+      instanceId: recBeta.instanceId,
+      receivableId: recBeta.id,
+      installmentId: 'inst-1',
+      providerId: 'prov-mock',
+      providerType: 'INTERNAL',
+      externalId: 'ext-mock',
+      method: 'PIX',
+      status: 'PENDING',
+      amount: 500.0,
+      dueDate: '2026-10-30',
+      txid: 'txid-beta-test-01',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const colLookupInAlfa = await repos.receivables.findCollectionById(cleanAlfa, colBeta.id);
+
+    // 7. Inventory (Depósitos)
+    const whBeta = await dbEngine.createWarehouseAsync(
+      beta.schemaNamespace,
+      {
+        code: 'DEP-BETA-01',
+        name: 'Depósito Secundário Beta',
+        isDefault: false,
+      },
+      beta.id
+    );
+    const whLookupInAlfa = dbEngine.getWarehouseById(alfa.schemaNamespace, whBeta.id);
+
+    // 8. Fiscal (Documentos)
+    const fiscalBeta = await dbEngine.createFiscalDocumentAsync(
+      beta.schemaNamespace,
+      {
+        model: 'NFE_55',
+        type: 'OUTBOUND',
+        natureOfOperation: 'Venda de Produção do Estabelecimento',
+        cfopPrincipal: '5.101',
+        partnerId: partnerBeta.id,
+        partnerName: partnerBeta.name,
+        partnerCnpjCpf: partnerBeta.document,
+        partnerAddress: partnerBeta.address,
+        items: [
+          {
+            productCode: 'ITM-01',
+            productName: 'Item Teste',
+            cfop: '5.101',
+            unit: 'UN',
+            quantity: 1,
+            unitPrice: 1000.0,
+            ncm: '8471.30.12',
+          },
+        ],
+      },
+      userMariana.id,
+      userMariana.name
+    );
+    const fiscalLookupInAlfa = dbEngine.getFiscalDocumentById(alfa.schemaNamespace, fiscalBeta.id);
+
+    // 9. Procurement (Pedidos de Compra)
+    const poBeta = await dbEngine.createPurchaseOrderAsync(
+      beta.schemaNamespace,
+      {
+        supplierId: partnerBeta.id,
+        supplierName: 'Fornecedor Beta Ltda',
+        supplierDocument: '11223344000199',
+        subtotal: 1500.0,
+        grandTotal: 1500.0,
+        items: [],
+      },
+      { id: userMariana.id, name: userMariana.name }
+    );
+    const poLookupInAlfa = dbEngine.getPurchaseOrderById(alfa.schemaNamespace, poBeta.id);
+
+    const allIsolated =
+      partnerLookupInAlfa === undefined &&
+      productLookupInAlfa === undefined &&
+      saleLookupInAlfa === undefined &&
+      billingLookupInAlfa === undefined &&
+      recLookupInAlfa === undefined &&
+      colLookupInAlfa === undefined &&
+      whLookupInAlfa === undefined &&
+      fiscalLookupInAlfa === undefined &&
+      poLookupInAlfa === undefined;
+
+    assert(
+      allIsolated,
+      '16. Anti-IDOR Cruzado: Nenhum recurso de Beta (Parceiros, Estoque, Vendas, Billing, Receivables, Collections, Fiscal, Compras) vaza para Alfa'
+    );
+  }
+
+  // -------------------------------------------------------------
+  // TESTE 17: AUDITORIA SEGURA - Redação Incondicional de Segredos
+  // -------------------------------------------------------------
+  {
+    const entry = AuditService.record({
+      action: 'USER_PASSWORD_CHANGE',
+      resource: '/api/v1/auth/password',
+      status: 'SUCCESS',
+      requestId: 'req-audit-leak-test',
+      details: {
+        safeField: 'audit_ok',
+        passwordPlain: 'SuperSecretPlainPassword#2026',
+        token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret',
+        jwtSecret: 'prod_jwt_super_secret_32_characters_long',
+        enlaceVaultKey: 'vault_key_secret_must_not_be_logged',
+      },
+    });
+
+    const isSanitized =
+      entry.details?.safeField === 'audit_ok' &&
+      entry.details?.passwordPlain === '[REDACTED]' &&
+      entry.details?.token === '[REDACTED]' &&
+      entry.details?.jwtSecret === '[REDACTED]' &&
+      entry.details?.enlaceVaultKey === '[REDACTED]';
+
+    assert(
+      isSanitized,
+      '17. Auditoria Segura: Senhas, tokens, JWTs e chaves de cofre são sanitizados e nunca expostos em logs'
     );
   }
 

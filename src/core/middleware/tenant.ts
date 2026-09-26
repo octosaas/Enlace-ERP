@@ -48,7 +48,7 @@ export async function tenantMiddleware(req: Request, _res: Response, next: NextF
     // Fallback se repositórios não estiverem inicializados
   }
 
-  if (!company) {
+  if (!company && !PostgresService.isDbConnected()) {
     company = dbEngine.getCompanyById(targetCompanyId);
   }
   if (!company) {
@@ -56,7 +56,7 @@ export async function tenantMiddleware(req: Request, _res: Response, next: NextF
   }
 
   // 2. Validação autoritativa no servidor: O usuário logado possui membresia nesta empresa?
-  if (!membership) {
+  if (!membership && !PostgresService.isDbConnected()) {
     membership = dbEngine.getMembership(req.user.id, company.id);
   }
 
