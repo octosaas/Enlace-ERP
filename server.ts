@@ -27,6 +27,7 @@ import { SecurityTestResult, UserRole, Receivable, Collection, PaymentRecord, Pa
 import { createRateLimitMiddleware, rateLimiter } from './src/core/security/rateLimiter.js';
 import { CredentialVault } from './src/core/security/vault.js';
 import { AIPrincipalManager } from './src/core/security/aiPrincipal.js';
+import { MaiaService, ToolRegistry, ProviderRegistry, AIAuditService, ContextBuilder } from './src/core/maia/index.js';
 import { TotpService } from './src/core/security/totp.js';
 import {
   validateFiscalDocument,
@@ -7154,6 +7155,189 @@ app.post(
         received: false,
         error: err.message,
       });
+    }
+  }
+);
+
+// ============================================================================
+// MAIA v2 — INTELIGÊNCIA ARTIFICIAL CORPORATIVA DELEGADA (PRD 02 - SEÇÕES 35 E 36)
+// ============================================================================
+
+app.post(
+  '/api/v1/maia/chat',
+  authMiddleware,
+  tenantMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { prompt, sessionId, modelProfile } = req.body;
+      if (!prompt || typeof prompt !== 'string') {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'O campo "prompt" é obrigatório e deve ser uma string de texto.',
+            requestId: req.requestId,
+          },
+        });
+      }
+
+      if (!req.tenantContext?.user || !req.tenantContext?.activeCompany || !req.tenantContext?.membership) {
+        throw new ForbiddenError('Contexto de empresa ou permissões incompletas.');
+      }
+
+      const context = ContextBuilder.build({
+        user: req.tenantContext.user,
+        company: req.tenantContext.activeCompany,
+        membership: req.tenantContext.membership,
+        requestId: req.requestId || `req-maia-${Date.now()}`,
+        sessionId,
+      });
+
+      const maiaService = MaiaService.getInstance();
+      const result = await maiaService.processChat({
+        prompt,
+        context,
+        modelProfile,
+        sessionId,
+      });
+
+      res.json({
+        success: true,
+        data: result,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.get(
+  '/api/v1/maia/tools',
+  authMiddleware,
+  tenantMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      if (!req.tenantContext?.user || !req.tenantContext?.activeCompany || !req.tenantContext?.membership) {
+        throw new ForbiddenError('Contexto de empresa ou permissões incompletas.');
+      }
+
+      const context = ContextBuilder.build({
+        user: req.tenantContext.user,
+        company: req.tenantContext.activeCompany,
+        membership: req.tenantContext.membership,
+        requestId: req.requestId || `req-maia-${Date.now()}`,
+      });
+
+      const toolRegistry = ToolRegistry.getInstance();
+      const authorizedTools = toolRegistry.getToolsForContext(context);
+
+      res.json({
+        success: true,
+        data: authorizedTools.map((t) => ({
+          name: t.name,
+          description: t.description,
+          category: t.category,
+          riskLevel: t.riskLevel,
+          requiresConfirmation: t.requiresConfirmation,
+          parameters: t.parameters,
+        })),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.post(
+  '/api/v1/maia/confirm',
+  authMiddleware,
+  tenantMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { token, confirmed } = req.body;
+      if (!token) {
+        return res.status(400).json({
+          success: false,
+          error: {
+            code: 'VALIDATION_ERROR',
+            message: 'O campo "token" de confirmação é obrigatório.',
+            requestId: req.requestId,
+          },
+        });
+      }
+
+      if (!req.tenantContext?.user || !req.tenantContext?.activeCompany || !req.tenantContext?.membership) {
+        throw new ForbiddenError('Contexto de empresa ou permissões incompletas.');
+      }
+
+      const context = ContextBuilder.build({
+        user: req.tenantContext.user,
+        company: req.tenantContext.activeCompany,
+        membership: req.tenantContext.membership,
+        requestId: req.requestId || `req-maia-${Date.now()}`,
+      });
+
+      const maiaService = MaiaService.getInstance();
+      const result = await maiaService.confirmAction({
+        token,
+        confirmed: confirmed !== false,
+        context,
+      });
+
+      res.json({
+        success: true,
+        data: result,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.get(
+  '/api/v1/maia/health',
+  authMiddleware,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const providerRegistry = ProviderRegistry.getInstance();
+      const health = await providerRegistry.healthCheckAll();
+      const activeProvider = providerRegistry.resolveProvider();
+
+      res.json({
+        success: true,
+        data: {
+          activeProvider: {
+            id: activeProvider.id,
+            name: activeProvider.name,
+          },
+          providers: health,
+        },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+app.get(
+  '/api/v1/maia/audit',
+  authMiddleware,
+  tenantMiddleware,
+  requirePermission(PERMISSIONS.AUDIT_VIEW),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { schemaNamespace } = req.tenantContext!;
+      const cleanCnpj = schemaNamespace!.replace('tenant_', '');
+      const limit = parseInt(req.query.limit as string) || 50;
+
+      const logs = AIAuditService.getInstance().getAuditLogsForTenant(cleanCnpj, limit);
+
+      res.json({
+        success: true,
+        data: logs,
+      });
+    } catch (err) {
+      next(err);
     }
   }
 );

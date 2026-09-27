@@ -101,6 +101,17 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
         icon: LayoutDashboard,
       },
       {
+        id: 'mod-maia',
+        type: 'module',
+        category: 'Módulos & Navegação',
+        title: 'MaIA v2 — IA Operacional Delegada (PRD 02)',
+        subtitle: 'Terminal conversacional, consultas seguras, catálogo de tools e confirmação em 2 etapas',
+        targetTab: 'maia',
+        badge: 'MaIA v2',
+        badgeColor: 'emerald',
+        icon: Sparkles,
+      },
+      {
         id: 'mod-masterdata',
         type: 'module',
         category: 'Módulos & Navegação',

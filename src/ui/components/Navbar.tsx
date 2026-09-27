@@ -33,6 +33,7 @@ import {
   HelpCircle,
   Rocket,
   Search,
+  Bot,
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -195,6 +196,18 @@ export const Navbar: React.FC<NavbarProps> = ({
         >
           <LayoutDashboard className="h-3.5 w-3.5" />
           Visão Geral
+        </button>
+
+        <button
+          onClick={() => onTabChange('maia')}
+          className={`flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold transition-colors whitespace-nowrap ${
+            currentTab === 'maia'
+              ? 'border-emerald-400 text-white bg-emerald-950/40 rounded-t'
+              : 'border-transparent text-emerald-400 hover:text-emerald-300'
+          }`}
+        >
+          <Bot className="h-3.5 w-3.5 text-emerald-400" />
+          MaIA v2 (IA Operacional)
         </button>
 
         <button

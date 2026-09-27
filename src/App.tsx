@@ -29,6 +29,7 @@ import { ProcurementView } from './ui/views/ProcurementView.js';
 import { BankingView } from './ui/views/BankingView.js';
 import { HelpView } from './ui/views/HelpView.js';
 import { DeployView } from './ui/views/DeployView.js';
+import { MaiaView } from './ui/views/MaiaView.js';
 import { ShieldCheck } from 'lucide-react';
 
 const AppContent: React.FC = () => {
@@ -131,6 +132,7 @@ const AppContent: React.FC = () => {
         {currentTab === 'help' && <HelpView />}
         {currentTab === 'deploy' && <DeployView />}
         {currentTab === 'settings' && <SettingsView />}
+        {currentTab === 'maia' && <MaiaView />}
       </main>
 
       <footer className="border-t border-slate-800/80 bg-slate-950/80 py-4 text-center text-xs text-slate-500">

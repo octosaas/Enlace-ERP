@@ -11,30 +11,23 @@
  */
 
 import { User, Company, Membership } from '../../shared/types.js';
-import { ForbiddenError, ValidationError } from '../errors/index.js';
-import { AuditService } from '../audit/service.js';
+import { PromptGuard } from '../maia/security/promptGuard.js';
+import { ActionPolicy } from '../maia/security/actionPolicy.js';
+import { DataPolicy } from '../maia/security/dataPolicy.js';
+import { ContextBuilder } from '../maia/context/contextBuilder.js';
+import {
+  AIPrincipalContext as MaiaAIPrincipalContext,
+  AIToolDefinition as MaiaAIToolDefinition,
+} from '../maia/types.js';
 
-export interface AIPrincipalContext {
-  principalId: 'maia-agent-core';
-  delegatedUser: User;
-  activeCompany: Company;
-  membership: Membership;
-  requestId: string;
-}
-
-export interface AIToolDefinition<TParams = any, TResult = any> {
-  name: string;
-  description: string;
-  requiredPermission: string;
-  isDangerous?: boolean;
-  execute: (context: AIPrincipalContext, params: TParams) => Promise<TResult>;
-}
+export type AIPrincipalContext = MaiaAIPrincipalContext;
+export type AIToolDefinition<TParams = any, TResult = any> = MaiaAIToolDefinition<TParams, TResult>;
 
 export class AIPrincipalManager {
   /**
    * Padrões conhecidos de Prompt Injection, Jailbreaks e Tentativas de Exfiltração
    */
-  private static readonly INJECTION_PATTERNS = [
+  static readonly INJECTION_PATTERNS = [
     /ignore\s+(all\s+)?(previous|prior)\s+instructions/i,
     /desconsidere\s+(todas\s+as\s+)?instru[çc][õo]es\s+anteriores/i,
     /system\s+prompt\s+(reveal|leak|show|display)/i,
@@ -56,77 +49,27 @@ export class AIPrincipalManager {
     company: Company;
     membership: Membership;
     requestId: string;
+    sessionId?: string;
   }): AIPrincipalContext {
-    return {
-      principalId: 'maia-agent-core',
-      delegatedUser: params.user,
-      activeCompany: params.company,
-      membership: params.membership,
-      requestId: params.requestId,
-    };
+    return ContextBuilder.build(params);
   }
 
   /**
    * Valida guardrail contra injeção de prompt e tentativas de quebra de instruções
    */
   static validatePromptSafety(prompt: string, context?: AIPrincipalContext): void {
-    if (!prompt || typeof prompt !== 'string') return;
-
-    for (const pattern of this.INJECTION_PATTERNS) {
-      if (pattern.test(prompt)) {
-        if (context) {
-          AuditService.recordSecurityEvent({
-            type: 'SECURITY_INJECTION_ATTEMPT',
-            severity: 'HIGH',
-            userId: context.delegatedUser.id,
-            userEmail: context.delegatedUser.email,
-            companyId: context.activeCompany.id,
-            schemaNamespace: context.activeCompany.schemaNamespace,
-            requestId: context.requestId,
-            details: {
-              principal: context.principalId,
-              flaggedPattern: pattern.toString(),
-              promptSnippet: prompt.slice(0, 100),
-            },
-            mitigationTaken: 'Execução de prompt bloqueada por Guardrails de Segurança da MaIA.',
-          });
-        }
-
-        throw new ValidationError(
-          'Comando rejeitado pelos Guardrails de Segurança da MaIA: Padrão não permitido ou tentativa de injeção detectada.'
-        );
-      }
-    }
+    PromptGuard.validatePromptSafety(prompt, context);
   }
 
   /**
    * Valida se a ação da IA é permitida com base nas permissões do usuário que delegou o comando
    */
-  static assertPermission(context: AIPrincipalContext, requiredPermission: string, toolActionName: string): void {
-    const hasPerm = context.membership.permissions.includes(requiredPermission);
-
-    if (!hasPerm) {
-      AuditService.recordSecurityEvent({
-        type: 'SECURITY_PERMISSION_DENIED',
-        severity: 'HIGH',
-        userId: context.delegatedUser.id,
-        userEmail: context.delegatedUser.email,
-        companyId: context.activeCompany.id,
-        schemaNamespace: context.activeCompany.schemaNamespace,
-        requestId: context.requestId,
-        details: {
-          principal: context.principalId,
-          attemptedAction: toolActionName,
-          requiredPermission,
-          reason: 'A IA MaIA tentou executar ação não permitida pelas permissões do usuário solicitante.',
-        },
-        mitigationTaken: 'Operação bloqueada na camada de autorização do AI Principal.',
-      });
-
-      throw new ForbiddenError(
-        `Ação da assistente MaIA bloqueada: O usuário solicitante não possui a permissão '${requiredPermission}' para a operação '${toolActionName}'.`
-      );
-    }
+  static assertPermission(
+    context: AIPrincipalContext,
+    requiredPermission: string,
+    toolActionName: string
+  ): void {
+    ActionPolicy.assertPermission(context, requiredPermission, toolActionName);
   }
 
   /**
@@ -138,23 +81,8 @@ export class AIPrincipalManager {
     tool: AIToolDefinition<TParams, TResult>,
     params: TParams
   ): Promise<TResult> {
-    // 1. Validação estrita de autorização prévia
-    this.assertPermission(context, tool.requiredPermission, tool.name);
-
-    // 2. Trava estrita contra ferramentas perigosas sem consentimento de administrador
-    if (tool.isDangerous && context.membership.role !== 'owner' && context.membership.role !== 'admin') {
-      throw new ForbiddenError(
-        `Ação crítica '${tool.name}' requer privilégio de Administrador ou Titular da conta.`
-      );
-    }
-
-    // 3. Execução com isolamento e auditoria
-    try {
-      const result = await tool.execute(context, params);
-      return result;
-    } catch (err: any) {
-      throw err;
-    }
+    ActionPolicy.validateToolExecution(context, tool);
+    return await tool.execute(context, params);
   }
 
   /**
@@ -165,12 +93,6 @@ export class AIPrincipalManager {
     data: T[],
     activeSchemaNamespace: string
   ): T[] {
-    return data.filter((item) => {
-      // Se o item contiver marcação de schema, valida conformidade estrita
-      if (item.schemaNamespace && item.schemaNamespace !== activeSchemaNamespace) {
-        return false;
-      }
-      return true;
-    });
+    return DataPolicy.filterByTenantSchema(data, activeSchemaNamespace);
   }
 }
